@@ -19,16 +19,46 @@ const String gossipSubIDv11 = '/meshsub/1.1.0';
 const String floodSubID = '/floodsub/1.0.0';
 // Potentially add more as needed, e.g., gossipSubIDv10 = '/meshsub/1.0.0';
 
+/// Represents a persistent outbound stream to a peer.
+class _PersistentStream {
+  final P2PStream stream;
+  final PeerId peerId;
+  final DateTime createdAt;
+  bool _isClosed = false;
+
+  _PersistentStream({
+    required this.stream,
+    required this.peerId,
+  }) : createdAt = DateTime.now();
+
+  bool get isClosed => _isClosed || stream.isClosed;
+
+  Future<void> close() async {
+    if (!_isClosed) {
+      _isClosed = true;
+      await stream.close();
+    }
+  }
+}
+
 /// Handles the raw communication for PubSub messages over libp2p.
 ///
 /// This class is responsible for:
 /// - Registering protocol handlers with the libp2p Host.
 /// - Encoding and decoding RPC messages.
-/// - Sending RPC messages to peers.
+/// - Sending RPC messages to peers using persistent streams.
 /// - Receiving RPC messages from peers and forwarding them for processing.
 class PubSubProtocol {
   final Host _host;
-  final Future<void> Function(PeerId peerId, pb.RPC rpc) _onRpcReceived; // PeerId type is now resolved
+  final Future<void> Function(PeerId peerId, pb.RPC rpc) _onRpcReceived;
+
+  /// Map of persistent outbound streams per peer
+  final Map<PeerId, _PersistentStream> _outboundStreams = {};
+
+  /// Lock for managing stream creation per peer
+  final Map<PeerId, Completer<_PersistentStream>> _streamCreationLocks = {};
+
+  bool _isClosing = false;
 
   /// Creates a new [PubSubProtocol] instance.
   ///
@@ -38,7 +68,7 @@ class PubSubProtocol {
   PubSubProtocol(this._host, this._onRpcReceived) {
     _host.setStreamHandler(gossipSubIDv11, _handleNewStreamData);
     // TODO: Register for other supported protocols like floodSubID if needed.
-    print('PubSubProtocol initialized and stream handler for $gossipSubIDv11 registered.');
+    print('PubSubProtocol initialized with persistent streams for $gossipSubIDv11.');
   }
 
   /// Internal handler for new streams, adapting to the Host's setStreamHandler signature.
@@ -74,45 +104,126 @@ class PubSubProtocol {
     }
   }
 
-  /// Sends an RPC message to a specific peer.
+  /// Gets or creates a persistent stream for the given peer.
+  ///
+  /// Returns a [_PersistentStream] that can be reused for multiple messages.
+  /// Uses a lock to prevent concurrent stream creation for the same peer.
+  Future<_PersistentStream> _getOrCreateStream(PeerId peerId, String protocolId) async {
+    if (_isClosing) {
+      throw StateError('PubSubProtocol is closing, cannot create new streams');
+    }
+
+    // Check if we already have a valid stream
+    final existingStream = _outboundStreams[peerId];
+    if (existingStream != null && !existingStream.isClosed) {
+      return existingStream;
+    }
+
+    // Remove closed stream if present
+    if (existingStream != null) {
+      _outboundStreams.remove(peerId);
+      print('Removed closed stream for peer $peerId');
+    }
+
+    // Check if another call is already creating a stream for this peer
+    final lock = _streamCreationLocks[peerId];
+    if (lock != null && !lock.isCompleted) {
+      print('Waiting for concurrent stream creation for peer $peerId');
+      return await lock.future;
+    }
+
+    // Create new lock for this stream creation
+    final newLock = Completer<_PersistentStream>();
+    _streamCreationLocks[peerId] = newLock;
+
+    try {
+      print('Creating new persistent stream to $peerId on protocol $protocolId');
+      final stream = await _host.newStream(peerId, [protocolId], p2p_context.Context());
+
+      final persistentStream = _PersistentStream(
+        stream: stream,
+        peerId: peerId,
+      );
+
+      _outboundStreams[peerId] = persistentStream;
+      newLock.complete(persistentStream);
+      print('Created persistent stream to $peerId (stream id: ${stream.id()})');
+
+      return persistentStream;
+    } catch (e, s) {
+      newLock.completeError(e, s);
+      print('Failed to create stream to $peerId: $e');
+      rethrow;
+    } finally {
+      _streamCreationLocks.remove(peerId);
+    }
+  }
+
+  /// Sends an RPC message to a specific peer using a persistent stream.
   ///
   /// [peerId] is the recipient peer.
   /// [rpc] is the RPC message to send.
-  /// [protocolId] is the specific PubSub protocol ID to use for the new stream.
-  Future<void> sendRpc(PeerId peerId, pb.RPC rpc, String protocolId) async { // PeerId type is now resolved
+  /// [protocolId] is the specific PubSub protocol ID to use.
+  Future<void> sendRpc(PeerId peerId, pb.RPC rpc, String protocolId) async {
     print('Attempting to send RPC to $peerId on protocol $protocolId: ${rpc.toShortString()}');
+    
+    if (_isClosing) {
+      throw StateError('PubSubProtocol is closing, cannot send RPC');
+    }
+
     try {
-      // final connection = await _host.connect(peerId); // Ensure connection
-      // final stream = await connection.newStream([protocolId]);
-      // TODO: Replace above with actual Host API to open a new stream.
-      // This is a placeholder for how one might get a stream.
-      // The actual API might be _host.newStream(peerId, [protocolId]);
+      // Get or create persistent stream
+      final persistentStream = await _getOrCreateStream(peerId, protocolId);
 
-      // For now, let's assume we need to get a connection first, then a stream.
-      // This part is highly dependent on the dart_libp2p Host API.
-      // Example:
-      // final stream = await _host.dialPeer(peerId, protocolId); // Fictional API
-
-      // Placeholder for stream opening logic
-      // This needs to be replaced with the correct dart_libp2p API call
-      // to open a new outbound stream to the peer for the given protocol.
-      final P2PStream stream = await _host.newStream(peerId, [protocolId], p2p_context.Context());
-
+      // Encode the RPC message
       final bytes = rpc.writeToBuffer();
-      await stream.write(bytes); // Use P2PStream.write()
-      await stream.close(); // Close the stream after writing (or just the write side if possible)
 
-      print('RPC sent to $peerId on $protocolId successfully.');
+      // Write to the persistent stream (do NOT close it)
+      await persistentStream.stream.write(bytes);
+
+      print('RPC sent to $peerId on persistent stream successfully.');
     } catch (e, s) {
-      print('Error sending RPC to $peerId on $protocolId: $e');
-      print(s);
-      // Rethrow or handle as appropriate for the PubSub logic.
+      print('Error sending RPC to $peerId on $protocolId: $e\n$s');
+      
+      // On error, mark the stream as closed and remove it
+      final stream = _outboundStreams.remove(peerId);
+      if (stream != null) {
+        await stream.close().catchError((err) {
+          print('Error closing failed stream to $peerId: $err');
+        });
+      }
+
+      // Rethrow for the caller to handle
       rethrow;
+    }
+  }
+
+  /// Closes the persistent stream to a peer (e.g., when peer disconnects).
+  Future<void> closePeerStream(PeerId peerId) async {
+    final stream = _outboundStreams.remove(peerId);
+    if (stream != null) {
+      print('Closing persistent stream to $peerId');
+      await stream.close();
     }
   }
 
   /// Closes the protocol handler and cleans up resources.
   Future<void> close() async {
+    _isClosing = true;
+
+    // Close all persistent outbound streams
+    print('Closing ${_outboundStreams.length} persistent streams...');
+    final closeOperations = <Future>[];
+    for (final entry in _outboundStreams.entries) {
+      closeOperations.add(
+        entry.value.close().catchError((e) {
+          print('Error closing stream to ${entry.key}: $e');
+        })
+      );
+    }
+    await Future.wait(closeOperations);
+    _outboundStreams.clear();
+
     // Unregister protocol handlers from the host
     _host.removeStreamHandler(gossipSubIDv11);
     // TODO: Unregister for other protocols if registered.

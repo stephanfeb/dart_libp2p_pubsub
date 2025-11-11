@@ -10,8 +10,10 @@ environment:
   sdk: ^3.5.0
 
 dependencies:
-  dart_libp2p: ^0.5.2
-  dart_libp2p_kad_dht: ^1.1.0
+  dart_libp2p:
+    path: /Users/stephanfeb/IdeaProjects/agentic/dart-libp2p
+  dart_libp2p_kad_dht:
+    path: /Users/stephanfeb/IdeaProjects/agentic/dart-libp2p-kad-dht
   dcid: ^1.0.0
 
   collection: ^1.17.1

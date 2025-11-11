@@ -321,6 +321,12 @@ class PubSub {
   void removePeer(PeerId peerId) {
     // Router also calls its own removePeer. This is for PubSub's internal cleanup.
     peerScores.remove(peerId);
+    
+    // Close the persistent stream to this peer
+    _comms.closePeerStream(peerId).catchError((e) {
+      print('PubSub: Error closing stream to ${peerId.toBase58()}: $e');
+    });
+    
     print('PubSub: Removed score for disconnected peer ${peerId.toBase58()}');
   }
 

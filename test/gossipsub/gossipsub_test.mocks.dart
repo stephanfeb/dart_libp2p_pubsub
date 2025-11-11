@@ -6,7 +6,6 @@
 import 'dart:async' as _i19;
 import 'dart:typed_data' as _i29;
 
-import 'package:dcid/dcid.dart' as _i15;
 import 'package:dart_libp2p/core/connmgr/conn_manager.dart' as _i6;
 import 'package:dart_libp2p/core/crypto/keys.dart' as _i30;
 import 'package:dart_libp2p/core/event/bus.dart' as _i7;
@@ -34,6 +33,7 @@ import 'package:dart_libp2p_pubsub/src/pb/rpc.pb.dart' as _i25;
 import 'package:dart_libp2p_pubsub/src/pb/trace.pb.dart' as _i31;
 import 'package:dart_libp2p_pubsub/src/tracing/tracer.dart' as _i11;
 import 'package:dart_libp2p_pubsub/src/util/midgen.dart' as _i24;
+import 'package:dcid/dcid.dart' as _i15;
 import 'package:mockito/mockito.dart' as _i1;
 import 'package:mockito/src/dummies.dart' as _i26;
 
@@ -819,6 +819,16 @@ class MockPubSubProtocol extends _i1.Mock implements _i13.PubSubProtocol {
             rpc,
             protocolId,
           ],
+        ),
+        returnValue: _i19.Future<void>.value(),
+        returnValueForMissingStub: _i19.Future<void>.value(),
+      ) as _i19.Future<void>);
+
+  @override
+  _i19.Future<void> closePeerStream(_i2.PeerId? peerId) => (super.noSuchMethod(
+        Invocation.method(
+          #closePeerStream,
+          [peerId],
         ),
         returnValue: _i19.Future<void>.value(),
         returnValueForMissingStub: _i19.Future<void>.value(),

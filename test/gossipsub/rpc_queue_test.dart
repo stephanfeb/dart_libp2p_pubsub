@@ -168,6 +168,12 @@ class MockPubSubProtocol implements PubSubProtocol {
   Future<void> close() async {
     // No-op for mock, or implement if specific close behavior is needed for tests
   }
+
+  @override
+  Future<void> closePeerStream(PeerId peerId) {
+    // TODO: implement closePeerStream
+    throw UnimplementedError();
+  }
 }
 
 void main() {
