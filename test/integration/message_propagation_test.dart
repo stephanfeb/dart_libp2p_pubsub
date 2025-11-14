@@ -315,6 +315,10 @@ class MockP2PStream implements P2PStream<Uint8List> {
   
   // Expose remotePeer via a getter to match the old mock's public field, if needed by other parts of the mock setup.
   PeerId get remotePeer => _remotePeer;
+
+  @override
+  // TODO: implement isWritable
+  bool get isWritable => throw UnimplementedError();
 }
 
 class MockNetwork implements Network, Dialer {

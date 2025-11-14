@@ -6,6 +6,7 @@ import 'package:dart_libp2p/core/peer/peer_id.dart';
 import 'package:dart_libp2p/core/host/host.dart';
 import 'package:dart_libp2p/core/network/stream.dart'; // Using P2PStream directly
 import 'package:dart_libp2p/core/network/context.dart' as p2p_context; // For Host.newStream context
+import 'package:dart_libp2p/p2p/transport/multiplexing/yamux/yamux_exceptions.dart';
 
 import '../pb/rpc.pb.dart' as pb;
 
@@ -171,30 +172,58 @@ class PubSubProtocol {
       throw StateError('PubSubProtocol is closing, cannot send RPC');
     }
 
-    try {
-      // Get or create persistent stream
-      final persistentStream = await _getOrCreateStream(peerId, protocolId);
+    // Try up to 2 times (initial + 1 retry) for stream state issues
+    for (var attempt = 0; attempt < 2; attempt++) {
+      try {
+        // Get or create persistent stream
+        final persistentStream = await _getOrCreateStream(peerId, protocolId);
 
-      // Encode the RPC message
-      final bytes = rpc.writeToBuffer();
+        // Check stream is writable (race condition protection)
+        if (!persistentStream.stream.isWritable) {
+          print('Stream to $peerId not writable, removing from cache');
+          _outboundStreams.remove(peerId);
+          if (attempt == 0) {
+            continue; // Retry with fresh stream
+          }
+          throw StateError('Stream to $peerId not writable after retry');
+        }
 
-      // Write to the persistent stream (do NOT close it)
-      await persistentStream.stream.write(bytes);
+        // Encode the RPC message
+        final bytes = rpc.writeToBuffer();
 
-      print('RPC sent to $peerId on persistent stream successfully.');
-    } catch (e, s) {
-      print('Error sending RPC to $peerId on $protocolId: $e\n$s');
-      
-      // On error, mark the stream as closed and remove it
-      final stream = _outboundStreams.remove(peerId);
-      if (stream != null) {
-        await stream.close().catchError((err) {
-          print('Error closing failed stream to $peerId: $err');
-        });
+        // Write to the persistent stream (do NOT close it)
+        await persistentStream.stream.write(bytes);
+
+        print('RPC sent to $peerId on persistent stream successfully.');
+        return; // Success
+        
+      } on YamuxStreamStateException catch (e) {
+        // Stream state error - retry once with fresh stream
+        if (attempt == 0) {
+          print('Stream to $peerId in state ${e.currentState}, removing and retrying...');
+          final stream = _outboundStreams.remove(peerId);
+          if (stream != null) {
+            await stream.close().catchError((_) {});
+          }
+          continue; // Retry
+        }
+        
+        // Second attempt failed, clean up and rethrow
+        print('Failed to send RPC to $peerId after retry: ${e.message}');
+        _outboundStreams.remove(peerId);
+        rethrow;
+        
+      } catch (e, s) {
+        // Any other exception type - don't retry, just fail
+        print('Error sending RPC to $peerId on $protocolId: $e\n$s');
+        final stream = _outboundStreams.remove(peerId);
+        if (stream != null) {
+          await stream.close().catchError((err) {
+            print('Error closing failed stream to $peerId: $err');
+          });
+        }
+        rethrow;
       }
-
-      // Rethrow for the caller to handle
-      rethrow;
     }
   }
 

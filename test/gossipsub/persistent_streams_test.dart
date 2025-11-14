@@ -52,6 +52,7 @@ void main() {
       final mockStream = MockP2PStream();
       when(mockStream.id()).thenReturn('stream-1');
       when(mockStream.isClosed).thenReturn(false);
+      when(mockStream.isWritable).thenReturn(true);
       when(mockStream.write(any)).thenAnswer((_) async {});
 
       when(mockHost.newStream(mockPeer1, [gossipSubIDv11], any))
@@ -74,6 +75,7 @@ void main() {
       final mockStream = MockP2PStream();
       when(mockStream.id()).thenReturn('stream-1');
       when(mockStream.isClosed).thenReturn(false);
+      when(mockStream.isWritable).thenReturn(true);
       when(mockStream.write(any)).thenAnswer((_) async {});
 
       when(mockHost.newStream(mockPeer1, [gossipSubIDv11], any))
@@ -105,10 +107,12 @@ void main() {
       
       when(mockStream1.id()).thenReturn('stream-1');
       when(mockStream1.isClosed).thenReturn(false);
+      when(mockStream1.isWritable).thenReturn(true);
       when(mockStream1.write(any)).thenAnswer((_) async {});
       
       when(mockStream2.id()).thenReturn('stream-2');
       when(mockStream2.isClosed).thenReturn(false);
+      when(mockStream2.isWritable).thenReturn(true);
       when(mockStream2.write(any)).thenAnswer((_) async {});
 
       when(mockHost.newStream(mockPeer1, [gossipSubIDv11], any))
@@ -139,10 +143,12 @@ void main() {
       
       when(mockStream1.id()).thenReturn('stream-1');
       when(mockStream1.isClosed).thenReturn(false); // Initially open
+      when(mockStream1.isWritable).thenReturn(true);
       when(mockStream1.write(any)).thenAnswer((_) async {});
       
       when(mockStream2.id()).thenReturn('stream-2');
       when(mockStream2.isClosed).thenReturn(false);
+      when(mockStream2.isWritable).thenReturn(true);
       when(mockStream2.write(any)).thenAnswer((_) async {});
 
       when(mockHost.newStream(mockPeer1, [gossipSubIDv11], any))
@@ -172,6 +178,7 @@ void main() {
       
       when(mockStream.id()).thenReturn('stream-1');
       when(mockStream.isClosed).thenReturn(false);
+      when(mockStream.isWritable).thenReturn(true);
       when(mockStream.write(any)).thenAnswer((_) async {});
 
       when(mockHost.newStream(mockPeer1, [gossipSubIDv11], any))
@@ -199,6 +206,7 @@ void main() {
       final mockStream = MockP2PStream();
       when(mockStream.id()).thenReturn('stream-1');
       when(mockStream.isClosed).thenReturn(false);
+      when(mockStream.isWritable).thenReturn(true);
       when(mockStream.write(any)).thenAnswer((_) async {});
       when(mockStream.close()).thenAnswer((_) async {});
 
@@ -221,11 +229,13 @@ void main() {
       
       when(mockStream1.id()).thenReturn('stream-1');
       when(mockStream1.isClosed).thenReturn(false);
+      when(mockStream1.isWritable).thenReturn(true);
       when(mockStream1.write(any)).thenThrow(Exception('Write failed'));
       when(mockStream1.close()).thenAnswer((_) async {});
       
       when(mockStream2.id()).thenReturn('stream-2');
       when(mockStream2.isClosed).thenReturn(false);
+      when(mockStream2.isWritable).thenReturn(true);
       when(mockStream2.write(any)).thenAnswer((_) async {});
 
       when(mockHost.newStream(mockPeer1, [gossipSubIDv11], any))
@@ -259,11 +269,13 @@ void main() {
       
       when(mockStream1.id()).thenReturn('stream-1');
       when(mockStream1.isClosed).thenReturn(false);
+      when(mockStream1.isWritable).thenReturn(true);
       when(mockStream1.write(any)).thenAnswer((_) async {});
       when(mockStream1.close()).thenAnswer((_) async {});
       
       when(mockStream2.id()).thenReturn('stream-2');
       when(mockStream2.isClosed).thenReturn(false);
+      when(mockStream2.isWritable).thenReturn(true);
       when(mockStream2.write(any)).thenAnswer((_) async {});
       when(mockStream2.close()).thenAnswer((_) async {});
 
@@ -302,6 +314,7 @@ void main() {
       final mockStream = MockP2PStream();
       when(mockStream.id()).thenReturn('stream-1');
       when(mockStream.isClosed).thenReturn(false);
+      when(mockStream.isWritable).thenReturn(true);
       when(mockStream.write(any)).thenAnswer((_) async {});
 
       when(mockHost.newStream(mockPeer1, [gossipSubIDv11], any))

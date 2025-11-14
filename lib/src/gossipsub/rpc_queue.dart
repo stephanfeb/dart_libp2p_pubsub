@@ -28,39 +28,71 @@ class PeerRpcQueue {
     print('[DEBUG] PeerRpcQueue ($peerId): add() called with ${rpc.toShortString()}. Queue length before: ${_queue.length}, _isSending: $_isSending');
     _queue.addLast(rpc);
     print('[DEBUG] PeerRpcQueue ($peerId): add() after addLast. Queue length: ${_queue.length}');
-    _trySend();
+    
+    // Fire-and-forget with explicit error containment
+    // Use runZoned to create an error-isolating zone that prevents errors from escaping
+    runZoned(() {
+      // Use Future.microtask to properly handle async errors
+      Future.microtask(() async {
+        try {
+          await _trySend();
+        } catch (e, s) {
+          // This should never happen due to _trySend's internal try-catch,
+          // but provides an extra safety net to prevent zone errors
+          print('[DEBUG] PeerRpcQueue ($peerId): Unexpected error in add() microtask: $e');
+          print('[DEBUG] Stack: $s');
+        }
+      }).catchError((e, s) {
+        // Final safety net: catch any errors that somehow escape the try-catch above
+        // This prevents unhandled errors from crashing the application
+        print('[DEBUG] PeerRpcQueue ($peerId): Error escaped to Future.catchError: $e');
+        print('[DEBUG] Stack: $s');
+      }, test: (e) => true); // Catch all error types
+    }, onError: (e, s) {
+      // Zone-level error handler - last line of defense
+      // This catches any errors that escape all other handlers
+      print('[DEBUG] PeerRpcQueue ($peerId): Error caught by zone error handler: $e');
+      print('[DEBUG] Stack: $s');
+    });
   }
 
   Future<void> _trySend() async {
-    print('[DEBUG] PeerRpcQueue ($peerId): _trySend() called. _isSending: $_isSending, queue empty: ${_queue.isEmpty}');
-    if (_isSending || _queue.isEmpty) {
-      if(_isSending) print('[DEBUG] PeerRpcQueue ($peerId): _trySend() returning because _isSending is true.');
-      if(_queue.isEmpty) print('[DEBUG] PeerRpcQueue ($peerId): _trySend() returning because queue is empty.');
-      return;
-    }
-    _isSending = true;
-    print('[DEBUG] PeerRpcQueue ($peerId): _trySend() set _isSending = true. Starting loop.');
-
-    while (_queue.isNotEmpty) {
-      final rpc = _queue.first; // Peek at the first message
-      print('[DEBUG] PeerRpcQueue ($peerId): Loop iteration. Queue length: ${_queue.length}. Processing ${rpc.toShortString()}');
-      try {
-        print('[DEBUG] PeerRpcQueue ($peerId): Attempting to send from queue: ${rpc.toShortString()} with protocol $protocolId');
-        // print('PeerRpcQueue ($peerId): Sending RPC: ${rpc.toShortString()}');
-        await comms.sendRpc(peerId, rpc, protocolId);
-        _queue.removeFirst(); // Successfully sent, remove from queue
-        print('[DEBUG] PeerRpcQueue ($peerId): Successfully sent ${rpc.toShortString()} and removed from queue. Queue length now: ${_queue.length}');
-      } catch (e, s) { // Added stack trace to catch
-        print('[DEBUG] PeerRpcQueue ($peerId): CAUGHT ERROR sending RPC: $e. Stack: $s. Message ${rpc.toShortString()} remains in queue. Stopping send loop.');
-        // TODO: Implement retry logic, backoff, or error handling (e.g., drop message, notify router).
-        // For now, we stop sending to this peer on error to avoid hammering.
-        _isSending = false;
+    try {
+      print('[DEBUG] PeerRpcQueue ($peerId): _trySend() called. _isSending: $_isSending, queue empty: ${_queue.isEmpty}');
+      if (_isSending || _queue.isEmpty) {
+        if(_isSending) print('[DEBUG] PeerRpcQueue ($peerId): _trySend() returning because _isSending is true.');
+        if(_queue.isEmpty) print('[DEBUG] PeerRpcQueue ($peerId): _trySend() returning because queue is empty.');
         return;
       }
-      // TODO: Add delay or rate limiting if needed.
+      _isSending = true;
+      print('[DEBUG] PeerRpcQueue ($peerId): _trySend() set _isSending = true. Starting loop.');
+
+      while (_queue.isNotEmpty) {
+        final rpc = _queue.first; // Peek at the first message
+        print('[DEBUG] PeerRpcQueue ($peerId): Loop iteration. Queue length: ${_queue.length}. Processing ${rpc.toShortString()}');
+        try {
+          print('[DEBUG] PeerRpcQueue ($peerId): Attempting to send from queue: ${rpc.toShortString()} with protocol $protocolId');
+          // print('PeerRpcQueue ($peerId): Sending RPC: ${rpc.toShortString()}');
+          await comms.sendRpc(peerId, rpc, protocolId);
+          _queue.removeFirst(); // Successfully sent, remove from queue
+          print('[DEBUG] PeerRpcQueue ($peerId): Successfully sent ${rpc.toShortString()} and removed from queue. Queue length now: ${_queue.length}');
+        } catch (e, s) { // Added stack trace to catch
+          print('[DEBUG] PeerRpcQueue ($peerId): CAUGHT ERROR sending RPC: $e. Stack: $s. Message ${rpc.toShortString()} remains in queue. Stopping send loop.');
+          // TODO: Implement retry logic, backoff, or error handling (e.g., drop message, notify router).
+          // For now, we stop sending to this peer on error to avoid hammering.
+          _isSending = false;
+          return;
+        }
+        // TODO: Add delay or rate limiting if needed.
+      }
+      _isSending = false;
+      print('[DEBUG] PeerRpcQueue ($peerId): _trySend() loop finished (queue empty). Set _isSending = false.');
+    } catch (e, s) {
+      // Outer catch-all to ensure _trySend never throws unhandled exceptions
+      print('[DEBUG] PeerRpcQueue ($peerId): UNEXPECTED ERROR in _trySend: $e');
+      print('[DEBUG] Stack trace: $s');
+      _isSending = false;
     }
-    _isSending = false;
-    print('[DEBUG] PeerRpcQueue ($peerId): _trySend() loop finished (queue empty). Set _isSending = false.');
   }
 
   /// Clears the queue for this peer.

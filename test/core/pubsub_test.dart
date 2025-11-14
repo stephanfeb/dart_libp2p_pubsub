@@ -117,6 +117,10 @@ class MockP2PStream implements P2PStream {
     // TODO: implement stat
     throw UnimplementedError();
   }
+
+  @override
+  // TODO: implement isWritable
+  bool get isWritable => throw UnimplementedError();
 }
 
 class _MockStreamSink implements StreamSink<List<int>> {
