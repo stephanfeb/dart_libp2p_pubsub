@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:collection';
 
 import 'package:dart_libp2p/core/peer/peer_id.dart';
+import 'package:dart_libp2p/p2p/protocol/identify/identify_exceptions.dart';
 import '../pb/rpc.pb.dart' as pb;
 import '../core/comm.dart'; // For PubSubProtocol and gossipSubIDv11 (or other protocol IDs)
 
@@ -76,6 +77,19 @@ class PeerRpcQueue {
           await comms.sendRpc(peerId, rpc, protocolId);
           _queue.removeFirst(); // Successfully sent, remove from queue
           print('[DEBUG] PeerRpcQueue ($peerId): Successfully sent ${rpc.toShortString()} and removed from queue. Queue length now: ${_queue.length}');
+        } on IdentifyTimeoutException catch (e) {
+          // Identify timeout is recoverable - peer may have gone offline.
+          // Clear the queue for this peer and stop sending.
+          print('[DEBUG] PeerRpcQueue ($peerId): Identify timeout - peer unreachable. Clearing queue (${_queue.length} messages) and stopping send loop.');
+          _queue.clear();
+          _isSending = false;
+          return;
+        } on IdentifyException catch (e) {
+          // Other identify errors - also stop sending to this peer
+          print('[DEBUG] PeerRpcQueue ($peerId): Identify error: $e. Clearing queue and stopping send loop.');
+          _queue.clear();
+          _isSending = false;
+          return;
         } catch (e, s) { // Added stack trace to catch
           print('[DEBUG] PeerRpcQueue ($peerId): CAUGHT ERROR sending RPC: $e. Stack: $s. Message ${rpc.toShortString()} remains in queue. Stopping send loop.');
           // TODO: Implement retry logic, backoff, or error handling (e.g., drop message, notify router).

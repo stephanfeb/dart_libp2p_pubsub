@@ -7,6 +7,7 @@ import 'package:dart_libp2p/core/host/host.dart';
 import 'package:dart_libp2p/core/network/stream.dart'; // Using P2PStream directly
 import 'package:dart_libp2p/core/network/context.dart' as p2p_context; // For Host.newStream context
 import 'package:dart_libp2p/p2p/transport/multiplexing/yamux/yamux_exceptions.dart';
+import 'package:dart_libp2p/p2p/protocol/identify/identify_exceptions.dart';
 
 import '../pb/rpc.pb.dart' as pb;
 
@@ -151,6 +152,17 @@ class PubSubProtocol {
       print('Created persistent stream to $peerId (stream id: ${stream.id()})');
 
       return persistentStream;
+    } on IdentifyTimeoutException catch (e, s) {
+      // Handle identify timeout gracefully - this is a recoverable error.
+      // The peer may have gone offline or be temporarily unreachable.
+      newLock.completeError(e, s);
+      print('PubSubProtocol: Identify timeout creating stream to $peerId. Peer may be unreachable: $e');
+      rethrow;
+    } on IdentifyException catch (e, s) {
+      // Handle other identify exceptions
+      newLock.completeError(e, s);
+      print('PubSubProtocol: Identify error creating stream to $peerId: $e');
+      rethrow;
     } catch (e, s) {
       newLock.completeError(e, s);
       print('Failed to create stream to $peerId: $e');
@@ -213,6 +225,27 @@ class PubSubProtocol {
         _outboundStreams.remove(peerId);
         rethrow;
         
+      } on IdentifyTimeoutException catch (e, s) {
+        // Identify timeout - peer may have gone offline. Handle gracefully.
+        print('PubSubProtocol: Identify timeout sending RPC to $peerId. Peer unreachable: $e');
+        final stream = _outboundStreams.remove(peerId);
+        if (stream != null) {
+          await stream.close().catchError((err) {
+            print('Error closing stream to $peerId after identify timeout: $err');
+          });
+        }
+        // Don't rethrow - this is a recoverable error that the RPC queue will handle
+        rethrow;
+      } on IdentifyException catch (e, s) {
+        // Other identify error - handle gracefully
+        print('PubSubProtocol: Identify error sending RPC to $peerId: $e\n$s');
+        final stream = _outboundStreams.remove(peerId);
+        if (stream != null) {
+          await stream.close().catchError((err) {
+            print('Error closing stream to $peerId after identify error: $err');
+          });
+        }
+        rethrow;
       } catch (e, s) {
         // Any other exception type - don't retry, just fail
         print('Error sending RPC to $peerId on $protocolId: $e\n$s');

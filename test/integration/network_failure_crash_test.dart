@@ -10,6 +10,7 @@ import 'package:dart_libp2p/core/network/stream.dart';
 import 'package:dart_libp2p/core/peer/peer_id.dart';
 import 'package:dart_libp2p/core/peerstore.dart';
 import 'package:dart_libp2p/p2p/protocol/holepunch/holepunch_service.dart';
+import 'package:dart_libp2p/p2p/protocol/identify/identify_exceptions.dart';
 import 'package:dart_libp2p_pubsub/src/core/comm.dart';
 import 'package:dart_libp2p_pubsub/src/gossipsub/rpc_queue.dart';
 import 'package:dart_libp2p_pubsub/src/pb/rpc.pb.dart' as pb;
@@ -317,6 +318,92 @@ void main() {
       expect(unhandledError, isNull, 
           reason: 'UDX timeout error should not escape as unhandled');
     });
+
+    test('Test 7: IdentifyTimeoutException should be caught and queue cleared', () async {
+      _logger.info('Starting Test 7: IdentifyTimeoutException handling');
+      
+      final hostA = await createHost();
+      final identifyTimeoutHost = IdentifyTimeoutHost(hostA);
+      
+      final comms = PubSubProtocol(
+        identifyTimeoutHost,
+        (peerId, rpc) async {
+          // Receive callback
+        },
+      );
+      
+      final fakePeerId = await PeerId.random();
+      final queue = PeerRpcQueue(fakePeerId, comms, gossipSubIDv11);
+      
+      final rpc = pb.RPC()..publish.add(pb.Message()..data = Uint8List.fromList([1]));
+      
+      _logger.info('Adding RPC that will trigger IdentifyTimeoutException');
+      
+      var unhandledError;
+      
+      await runZonedGuarded(() async {
+        queue.add(rpc);
+        await Future.delayed(Duration(milliseconds: 500));
+      }, (error, stackTrace) {
+        unhandledError = error;
+        _logger.severe('UNHANDLED ERROR CAUGHT IN ZONE: $error', error, stackTrace);
+      });
+      
+      _logger.info('Test 7 completed');
+      
+      await comms.close();
+      await hostA.close();
+      
+      expect(unhandledError, isNull, 
+          reason: 'IdentifyTimeoutException should not escape as unhandled');
+      
+      // Verify queue was cleared (our fix clears the queue on identify timeout)
+      expect(queue.length, equals(0),
+          reason: 'Queue should be cleared when IdentifyTimeoutException occurs');
+    });
+
+    test('Test 8: IdentifyStreamException should be caught and queue cleared', () async {
+      _logger.info('Starting Test 8: IdentifyStreamException handling');
+      
+      final hostA = await createHost();
+      final identifyStreamErrorHost = IdentifyStreamErrorHost(hostA);
+      
+      final comms = PubSubProtocol(
+        identifyStreamErrorHost,
+        (peerId, rpc) async {
+          // Receive callback
+        },
+      );
+      
+      final fakePeerId = await PeerId.random();
+      final queue = PeerRpcQueue(fakePeerId, comms, gossipSubIDv11);
+      
+      final rpc = pb.RPC()..publish.add(pb.Message()..data = Uint8List.fromList([1]));
+      
+      _logger.info('Adding RPC that will trigger IdentifyStreamException');
+      
+      var unhandledError;
+      
+      await runZonedGuarded(() async {
+        queue.add(rpc);
+        await Future.delayed(Duration(milliseconds: 500));
+      }, (error, stackTrace) {
+        unhandledError = error;
+        _logger.severe('UNHANDLED ERROR CAUGHT IN ZONE: $error', error, stackTrace);
+      });
+      
+      _logger.info('Test 8 completed');
+      
+      await comms.close();
+      await hostA.close();
+      
+      expect(unhandledError, isNull, 
+          reason: 'IdentifyStreamException should not escape as unhandled');
+      
+      // Verify queue was cleared (our fix clears the queue on identify exceptions)
+      expect(queue.length, equals(0),
+          reason: 'Queue should be cleared when IdentifyStreamException occurs');
+    });
   });
 }
 
@@ -449,6 +536,126 @@ class UDXTimeoutHost implements Host {
         '/ip4/164.92.167.82/udp/34050/udx: UDXTransportException: UDX operation timed out after 30000ms (context: UDPSocket.handshakeComplete(164.92.167.82:34050), transient: true); '
         '/ip4/164.92.167.82/udp/42956/udx: UDXTransportException: UDX operation timed out after 30000ms (context: UDPSocket.handshakeComplete(164.92.167.82:42956), transient: true)';
     throw Exception(error);
+  }
+
+  @override
+  PeerId get id => _wrapped.id;
+
+  @override
+  List<MultiAddr> get addrs => _wrapped.addrs;
+
+  @override
+  Network get network => _wrapped.network;
+
+  @override
+  Peerstore get peerStore => _wrapped.peerStore;
+
+  @override
+  ConnManager get connManager => _wrapped.connManager;
+
+  @override
+  EventBus get eventBus => _wrapped.eventBus;
+
+  @override
+  ProtocolSwitch get mux => _wrapped.mux;
+
+  @override
+  Future<void> close() => _wrapped.close();
+
+  @override
+  Future<void> connect(AddrInfo peer, {Context? context}) => _wrapped.connect(peer, context: context);
+
+  @override
+  void removeStreamHandler(String protocol) => _wrapped.removeStreamHandler(protocol);
+
+  @override
+  void setStreamHandler(String protocol, StreamHandler handler) => _wrapped.setStreamHandler(protocol, handler);
+
+  @override
+  void setStreamHandlerMatch(String protocol, dynamic match, StreamHandler handler) => 
+      _wrapped.setStreamHandlerMatch(protocol, match, handler);
+
+  @override
+  Future<void> start() => _wrapped.start();
+
+  @override
+  HolePunchService? get holePunchService => null;
+}
+
+/// A Host wrapper that simulates IdentifyTimeoutException errors
+class IdentifyTimeoutHost implements Host {
+  final Host _wrapped;
+
+  IdentifyTimeoutHost(this._wrapped);
+
+  @override
+  Future<P2PStream> newStream(PeerId remotePeerId, List<String> protocols, [dynamic context]) async {
+    // Simulate the IdentifyTimeoutException from our fix
+    throw IdentifyTimeoutException(
+      peerId: remotePeerId,
+      message: 'Dial failed due to identify timeout',
+      cause: TimeoutException('Simulated identify timeout', Duration(seconds: 30)),
+    );
+  }
+
+  @override
+  PeerId get id => _wrapped.id;
+
+  @override
+  List<MultiAddr> get addrs => _wrapped.addrs;
+
+  @override
+  Network get network => _wrapped.network;
+
+  @override
+  Peerstore get peerStore => _wrapped.peerStore;
+
+  @override
+  ConnManager get connManager => _wrapped.connManager;
+
+  @override
+  EventBus get eventBus => _wrapped.eventBus;
+
+  @override
+  ProtocolSwitch get mux => _wrapped.mux;
+
+  @override
+  Future<void> close() => _wrapped.close();
+
+  @override
+  Future<void> connect(AddrInfo peer, {Context? context}) => _wrapped.connect(peer, context: context);
+
+  @override
+  void removeStreamHandler(String protocol) => _wrapped.removeStreamHandler(protocol);
+
+  @override
+  void setStreamHandler(String protocol, StreamHandler handler) => _wrapped.setStreamHandler(protocol, handler);
+
+  @override
+  void setStreamHandlerMatch(String protocol, dynamic match, StreamHandler handler) => 
+      _wrapped.setStreamHandlerMatch(protocol, match, handler);
+
+  @override
+  Future<void> start() => _wrapped.start();
+
+  @override
+  HolePunchService? get holePunchService => null;
+}
+
+/// A Host wrapper that simulates IdentifyStreamException errors
+class IdentifyStreamErrorHost implements Host {
+  final Host _wrapped;
+
+  IdentifyStreamErrorHost(this._wrapped);
+
+  @override
+  Future<P2PStream> newStream(PeerId remotePeerId, List<String> protocols, [dynamic context]) async {
+    // Simulate the IdentifyStreamException from our fix
+    throw IdentifyStreamException(
+      peerId: remotePeerId,
+      message: 'Failed to open or negotiate identify stream with peer',
+      cause: Exception('Stream closed by remote'),
+    );
   }
 
   @override
