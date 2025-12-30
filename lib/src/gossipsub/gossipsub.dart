@@ -142,6 +142,10 @@ class GossipSubRouter implements Router {
     mesh.forEach((topic, peers) => peers.remove(peerId));
     fanout.forEach((topic, peers) => peers.remove(peerId));
     _rpcQueueManager.peerDisconnected(peerId);
+    
+    // Unprotect peer since it's no longer in any mesh
+    _pubsub?.host?.connManager.unprotect(peerId, 'gossipsub-mesh');
+    print('GossipSubRouter: Unprotected removed peer $peerId');
   }
 
   @override
@@ -362,6 +366,10 @@ class GossipSubRouter implements Router {
           );
           mesh.putIfAbsent(topicId, () => <PeerId>{});
           mesh[topicId]!.add(peerId);
+          
+          // Protect mesh peer connection to prevent premature disconnection
+          _pubsub?.host?.connManager.protect(peerId, 'gossipsub-mesh');
+          print('GossipSubRouter: Protected mesh peer $peerId for topic $topicId');
         }
       }
       if (control.prune.isNotEmpty) {
@@ -377,6 +385,12 @@ class GossipSubRouter implements Router {
             ..prune = pruneTrace
           );
           mesh[topicId]?.remove(peerId);
+          
+          // Unprotect peer if not in any other mesh
+          if (!_isPeerInAnyMesh(peerId)) {
+            _pubsub?.host?.connManager.unprotect(peerId, 'gossipsub-mesh');
+            print('GossipSubRouter: Unprotected peer $peerId (not in any mesh)');
+          }
         }
       }
       if (control.idontwant.isNotEmpty) {
@@ -634,6 +648,16 @@ class GossipSubRouter implements Router {
     return false;
   }
 
+  /// Check if a peer is in any mesh (across all topics)
+  bool _isPeerInAnyMesh(PeerId peerId) {
+    for (final meshPeers in mesh.values) {
+      if (meshPeers.contains(peerId)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   void _heartbeat() {
     print('GossipSubRouter: Heartbeat tick');
     final now = DateTime.now();
@@ -850,6 +874,12 @@ class GossipSubRouter implements Router {
           
           // Remove from local mesh
           mesh[topicId]!.remove(peerToPrune);
+          
+          // Unprotect peer if not in any other mesh
+          if (!_isPeerInAnyMesh(peerToPrune)) {
+            _pubsub?.host?.connManager.unprotect(peerToPrune, 'gossipsub-mesh');
+            print('Heartbeat: Unprotected pruned peer $peerToPrune (not in any mesh)');
+          }
 
           // Also trace the PRUNE event itself
           final pruneTrace = trace_pb.TraceEvent_Prune()
