@@ -169,7 +169,7 @@ class GossipSubRouter implements Router {
 
         // --- BEGIN INSERTED VALIDATION LOGIC ---
         final pubSubMessage = PubSubMessage(rpcMessage: msgProto, receivedFrom: peerId);
-        final validationResult = _pubsub?.validateMessage(pubSubMessage);
+        final validationResult = await _pubsub?.validateMessage(pubSubMessage);
 
         if (validationResult == null) { // Should not happen if pubsub is attached
             print('GossipSubRouter: PubSub not available for validation. Message $msgIdStr from $peerId dropped.');

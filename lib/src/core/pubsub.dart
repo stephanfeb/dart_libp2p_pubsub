@@ -185,10 +185,10 @@ class PubSub {
 
   /// Validates an incoming message using the registered validators and built-in checks.
   /// This is expected to be called by the Router.
-  ValidationResult validateMessage(PubSubMessage message) {
+  Future<ValidationResult> validateMessage(PubSubMessage message) async {
     // TODO: Integrate custom _validators if their signature is updated to PubSubMessage -> ValidationResult
-    // For now, relies on validateFullMessage which includes structural and signature (placeholder) checks.
-    return validateFullMessage(message);
+    // For now, relies on validateFullMessage which includes structural and signature checks.
+    return await validateFullMessage(message);
   }
 
   // --- Message Publishing ---
@@ -223,7 +223,7 @@ class PubSub {
     );
 
     // Validate the constructed PubSubMessage
-    if (validateMessage(pubSubMessage) != ValidationResult.accept) {
+    if (await validateMessage(pubSubMessage) != ValidationResult.accept) {
       print('PubSub: Constructed message for topic "$topic" is invalid. Dropping.');
       // Optionally, trace a REJECT_MESSAGE or similar event here if desired for local drops
       return;

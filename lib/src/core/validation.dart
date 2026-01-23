@@ -1,8 +1,9 @@
 import 'message.dart'; // For PubSubMessage
 import '../pb/rpc.pb.dart' as pb; // For pb.Message
 import 'package:dart_libp2p/core/peer/peer_id.dart'; // For PeerId
-// Potentially import 'pubsub.dart' if MessageValidator typedef is needed here,
-// or redefine a similar concept.
+import 'package:dart_libp2p/core/crypto/ed25519.dart'; // For Ed25519PublicKey
+import 'package:dart_libp2p/core/crypto/keys.dart'; // For PublicKey
+import 'sign.dart'; // For verifyMessageSignature
 
 import 'dart:typed_data'; // For Uint8List
 
@@ -69,18 +70,57 @@ ValidationResult validateMessageStructure(
   return ValidationResult.accept;
 }
 
-/// Validates message signatures if strict signing is enabled.
-/// Corresponds to parts of `validateReceivedMessage` related to signature checks in Go.
-ValidationResult validateMessageSignature(PubSubMessage message) {
-  // TODO: Implement signature validation if strict signing is required.
-  // This involves:
-  // 1. Getting the public key from message.from (PeerId).
-  // 2. Reconstructing the message data that was signed.
-  // 3. Verifying message.signature against the data and public key.
-  // This is a complex part and depends on crypto utilities.
-  // For now, assuming optional or not strictly enforced at this basic level.
-  print('Validation: Signature validation (TODO) for message from ${message.from.toBase58()}');
-  return ValidationResult.accept; // Placeholder
+/// Validates message signatures with strict signing policy.
+///
+/// Returns:
+/// - [ValidationResult.reject] if signature is missing or invalid
+/// - [ValidationResult.reject] if key-PeerId consistency check fails
+/// - [ValidationResult.accept] if signature verification passes
+Future<ValidationResult> validateMessageSignature(PubSubMessage message) async {
+  final rpcMessage = message.rpcMessage;
+
+  // 1. STRICT SIGNATURE POLICY: Reject messages without signatures
+  if (rpcMessage.signature.isEmpty) {
+    print('Validation: Message from ${message.from.toBase58()} rejected - missing signature');
+    return ValidationResult.reject;
+  }
+
+  // 2. Require public key in message for verification
+  if (rpcMessage.key.isEmpty) {
+    print('Validation: Message from ${message.from.toBase58()} rejected - missing public key');
+    return ValidationResult.reject;
+  }
+
+  // 3. KEY-PEERID CONSISTENCY CHECK
+  // Parse the public key from the message
+  PublicKey publicKey;
+  try {
+    publicKey = Ed25519PublicKey.fromRawBytes(Uint8List.fromList(rpcMessage.key));
+  } catch (e) {
+    print('Validation: Message from ${message.from.toBase58()} rejected - invalid public key format: $e');
+    return ValidationResult.reject;
+  }
+
+  // Verify the public key matches the claimed sender PeerId
+  final senderPeerId = message.from;
+  if (!senderPeerId.matchesPublicKey(publicKey)) {
+    print('Validation: Message from ${message.from.toBase58()} rejected - key-PeerId mismatch');
+    return ValidationResult.reject;
+  }
+
+  // 4. SIGNATURE VERIFICATION
+  try {
+    final isValid = await verifyMessageSignature(message);
+    if (!isValid) {
+      print('Validation: Message from ${message.from.toBase58()} rejected - invalid signature');
+      return ValidationResult.reject;
+    }
+  } catch (e) {
+    print('Validation: Message from ${message.from.toBase58()} rejected - signature verification error: $e');
+    return ValidationResult.reject;
+  }
+
+  return ValidationResult.accept;
 }
 
 // --- Other validation aspects from validation_builtin.go to consider ---
@@ -95,24 +135,26 @@ ValidationResult validateMessageSignature(PubSubMessage message) {
 
 /// Combines multiple validation steps.
 /// This would be used by PubSub core to validate incoming messages.
-ValidationResult validateFullMessage(
+Future<ValidationResult> validateFullMessage(
   PubSubMessage message, {
   int maxMessageSize = defaultMaxMessageSize,
   // BasicSeqnoValidator? seqnoValidator, // Example of how it might be passed
-}) {
+}) async {
+  // Structural validation is synchronous
   var result = validateMessageStructure(message, maxMessageSize: maxMessageSize);
   if (result != ValidationResult.accept) {
     return result;
   }
 
-  result = validateMessageSignature(message);
+  // Signature validation is async
+  result = await validateMessageSignature(message);
   if (result != ValidationResult.accept) {
     return result;
   }
 
   // Add more validation steps here as they are implemented.
   // if (seqnoValidator != null) {
-  //   result = seqnoValidator.validate(message);
+  //   result = await seqnoValidator.validate(message);
   //   if (result != ValidationResult.accept) {
   //     return result;
   //   }

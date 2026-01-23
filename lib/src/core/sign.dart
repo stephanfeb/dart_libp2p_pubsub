@@ -74,10 +74,9 @@ Future<bool> verifyMessageSignature(PubSubMessage pubsubMessage) async {
   final rpcMessage = pubsubMessage.rpcMessage;
 
   if (rpcMessage.signature.isEmpty) {
-    // Depending on policy (e.g. strict_signature_verification),
-    // this could be an automatic fail or allowed for certain peers/topics.
-    print('Verification: Message has no signature. Assuming valid for now (TODO: policy).');
-    return true; // Placeholder: No signature, treat as valid for now.
+    // STRICT SIGNING: Reject messages without signatures
+    print('Verification: Message has no signature. Rejecting (strict mode).');
+    return false;
   }
 
   // 1. Get the sender's public key.

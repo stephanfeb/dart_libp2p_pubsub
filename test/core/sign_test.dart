@@ -176,8 +176,38 @@ void main() {
 
     });
 
-    // TODO: Add tests for StrictNoSign (if it's a separate signer/verifier)
-    // TODO: Add tests for StrictSign (if it's a separate signer/verifier)
-    // TODO: Test scenarios where signature or key is missing in the message for verification.
+    test('should fail verification for message without signature (strict mode)', () async {
+      final pbMsg = createTestPbMessage(
+        from: peerId,
+        topic: 'test-topic',
+        data: Uint8List.fromList([1, 2, 3]),
+        seqno: Uint8List.fromList([1]),
+      );
+      pbMsg.key = keyPair.publicKey.raw;
+      // No signature set
+
+      final pubsubMsg = PubSubMessage(rpcMessage: pbMsg, receivedFrom: peerId);
+      final isValid = await verifyMessageSignature(pubsubMsg);
+
+      expect(isValid, isFalse, reason: "Strict mode should reject messages without signatures");
+    });
+
+    test('should fail verification for message without public key', () async {
+      final pbMsg = createTestPbMessage(
+        from: peerId,
+        topic: 'test-topic',
+        data: Uint8List.fromList([1, 2, 3]),
+        seqno: Uint8List.fromList([1]),
+      );
+      // Sign the message
+      await signMessage(pbMsg, keyPair.privateKey);
+      // But don't set the key field
+      pbMsg.key = Uint8List(0);
+
+      final pubsubMsg = PubSubMessage(rpcMessage: pbMsg, receivedFrom: peerId);
+      final isValid = await verifyMessageSignature(pubsubMsg);
+
+      expect(isValid, isFalse, reason: "Verification should fail without public key in message");
+    });
   });
 }

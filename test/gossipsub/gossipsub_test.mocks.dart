@@ -503,14 +503,16 @@ class MockPubSub extends _i1.Mock implements _i22.PubSub {
       );
 
   @override
-  _i27.ValidationResult validateMessage(_i28.PubSubMessage? message) =>
+  _i19.Future<_i27.ValidationResult> validateMessage(
+          _i28.PubSubMessage? message) =>
       (super.noSuchMethod(
         Invocation.method(
           #validateMessage,
           [message],
         ),
-        returnValue: _i27.ValidationResult.accept,
-      ) as _i27.ValidationResult);
+        returnValue: _i19.Future<_i27.ValidationResult>.value(
+            _i27.ValidationResult.accept),
+      ) as _i19.Future<_i27.ValidationResult>);
 
   @override
   _i19.Future<void> publish(
