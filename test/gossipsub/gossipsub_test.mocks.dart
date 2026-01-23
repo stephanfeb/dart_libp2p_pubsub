@@ -3,39 +3,41 @@
 // Do not manually edit this file.
 
 // ignore_for_file: no_leading_underscores_for_library_prefixes
-import 'dart:async' as _i19;
-import 'dart:typed_data' as _i29;
+import 'dart:async' as _i20;
+import 'dart:typed_data' as _i30;
 
 import 'package:dart_libp2p/core/connmgr/conn_manager.dart' as _i6;
-import 'package:dart_libp2p/core/crypto/keys.dart' as _i30;
+import 'package:dart_libp2p/core/crypto/keys.dart' as _i31;
 import 'package:dart_libp2p/core/event/bus.dart' as _i7;
 import 'package:dart_libp2p/core/host/host.dart' as _i9;
-import 'package:dart_libp2p/core/multiaddr.dart' as _i18;
+import 'package:dart_libp2p/core/multiaddr.dart' as _i19;
 import 'package:dart_libp2p/core/network/conn.dart' as _i17;
-import 'package:dart_libp2p/core/network/context.dart' as _i21;
+import 'package:dart_libp2p/core/network/context.dart' as _i22;
 import 'package:dart_libp2p/core/network/network.dart' as _i4;
-import 'package:dart_libp2p/core/network/notifiee.dart' as _i32;
+import 'package:dart_libp2p/core/network/notifiee.dart' as _i18;
 import 'package:dart_libp2p/core/network/rcmgr.dart' as _i16;
 import 'package:dart_libp2p/core/network/stream.dart' as _i8;
-import 'package:dart_libp2p/core/peer/addr_info.dart' as _i20;
+import 'package:dart_libp2p/core/network/transport_conn.dart' as _i33;
+import 'package:dart_libp2p/core/peer/addr_info.dart' as _i21;
 import 'package:dart_libp2p/core/peer/peer_id.dart' as _i2;
 import 'package:dart_libp2p/core/peerstore.dart' as _i3;
 import 'package:dart_libp2p/core/protocol/switch.dart' as _i5;
+import 'package:dart_libp2p/p2p/transport/connection_state.dart' as _i34;
 import 'package:dart_libp2p_pubsub/src/core/comm.dart' as _i13;
-import 'package:dart_libp2p_pubsub/src/core/message.dart' as _i28;
-import 'package:dart_libp2p_pubsub/src/core/pubsub.dart' as _i22;
+import 'package:dart_libp2p_pubsub/src/core/message.dart' as _i29;
+import 'package:dart_libp2p_pubsub/src/core/pubsub.dart' as _i23;
 import 'package:dart_libp2p_pubsub/src/core/router.dart' as _i10;
 import 'package:dart_libp2p_pubsub/src/core/subscription.dart' as _i14;
-import 'package:dart_libp2p_pubsub/src/core/validation.dart' as _i27;
-import 'package:dart_libp2p_pubsub/src/gossipsub/score.dart' as _i23;
+import 'package:dart_libp2p_pubsub/src/core/validation.dart' as _i28;
+import 'package:dart_libp2p_pubsub/src/gossipsub/score.dart' as _i24;
 import 'package:dart_libp2p_pubsub/src/gossipsub/score_params.dart' as _i12;
-import 'package:dart_libp2p_pubsub/src/pb/rpc.pb.dart' as _i25;
-import 'package:dart_libp2p_pubsub/src/pb/trace.pb.dart' as _i31;
+import 'package:dart_libp2p_pubsub/src/pb/rpc.pb.dart' as _i26;
+import 'package:dart_libp2p_pubsub/src/pb/trace.pb.dart' as _i32;
 import 'package:dart_libp2p_pubsub/src/tracing/tracer.dart' as _i11;
-import 'package:dart_libp2p_pubsub/src/util/midgen.dart' as _i24;
+import 'package:dart_libp2p_pubsub/src/util/midgen.dart' as _i25;
 import 'package:dcid/dcid.dart' as _i15;
 import 'package:mockito/mockito.dart' as _i1;
-import 'package:mockito/src/dummies.dart' as _i26;
+import 'package:mockito/src/dummies.dart' as _i27;
 
 // ignore_for_file: type=lint
 // ignore_for_file: avoid_redundant_argument_values
@@ -214,6 +216,16 @@ class _FakeConn_15 extends _i1.SmartFake implements _i17.Conn {
         );
 }
 
+class _FakeNotifiee_16 extends _i1.SmartFake implements _i18.Notifiee {
+  _FakeNotifiee_16(
+    Object parent,
+    Invocation parentInvocation,
+  ) : super(
+          parent,
+          parentInvocation,
+        );
+}
+
 /// A class which mocks [Host].
 ///
 /// See the documentation for Mockito's code generation for more information.
@@ -241,10 +253,10 @@ class MockHost extends _i1.Mock implements _i9.Host {
       ) as _i3.Peerstore);
 
   @override
-  List<_i18.MultiAddr> get addrs => (super.noSuchMethod(
+  List<_i19.MultiAddr> get addrs => (super.noSuchMethod(
         Invocation.getter(#addrs),
-        returnValue: <_i18.MultiAddr>[],
-      ) as List<_i18.MultiAddr>);
+        returnValue: <_i19.MultiAddr>[],
+      ) as List<_i19.MultiAddr>);
 
   @override
   _i4.Network get network => (super.noSuchMethod(
@@ -283,9 +295,9 @@ class MockHost extends _i1.Mock implements _i9.Host {
       ) as _i7.EventBus);
 
   @override
-  _i19.Future<void> connect(
-    _i20.AddrInfo? pi, {
-    _i21.Context? context,
+  _i20.Future<void> connect(
+    _i21.AddrInfo? pi, {
+    _i22.Context? context,
   }) =>
       (super.noSuchMethod(
         Invocation.method(
@@ -293,9 +305,9 @@ class MockHost extends _i1.Mock implements _i9.Host {
           [pi],
           {#context: context},
         ),
-        returnValue: _i19.Future<void>.value(),
-        returnValueForMissingStub: _i19.Future<void>.value(),
-      ) as _i19.Future<void>);
+        returnValue: _i20.Future<void>.value(),
+        returnValueForMissingStub: _i20.Future<void>.value(),
+      ) as _i20.Future<void>);
 
   @override
   void setStreamHandler(
@@ -341,10 +353,10 @@ class MockHost extends _i1.Mock implements _i9.Host {
       );
 
   @override
-  _i19.Future<_i8.P2PStream<dynamic>> newStream(
+  _i20.Future<_i8.P2PStream<dynamic>> newStream(
     _i2.PeerId? p,
     List<String>? pids,
-    _i21.Context? context,
+    _i22.Context? context,
   ) =>
       (super.noSuchMethod(
         Invocation.method(
@@ -356,7 +368,7 @@ class MockHost extends _i1.Mock implements _i9.Host {
           ],
         ),
         returnValue:
-            _i19.Future<_i8.P2PStream<dynamic>>.value(_FakeP2PStream_6<dynamic>(
+            _i20.Future<_i8.P2PStream<dynamic>>.value(_FakeP2PStream_6<dynamic>(
           this,
           Invocation.method(
             #newStream,
@@ -367,33 +379,33 @@ class MockHost extends _i1.Mock implements _i9.Host {
             ],
           ),
         )),
-      ) as _i19.Future<_i8.P2PStream<dynamic>>);
+      ) as _i20.Future<_i8.P2PStream<dynamic>>);
 
   @override
-  _i19.Future<void> close() => (super.noSuchMethod(
+  _i20.Future<void> close() => (super.noSuchMethod(
         Invocation.method(
           #close,
           [],
         ),
-        returnValue: _i19.Future<void>.value(),
-        returnValueForMissingStub: _i19.Future<void>.value(),
-      ) as _i19.Future<void>);
+        returnValue: _i20.Future<void>.value(),
+        returnValueForMissingStub: _i20.Future<void>.value(),
+      ) as _i20.Future<void>);
 
   @override
-  _i19.Future<void> start() => (super.noSuchMethod(
+  _i20.Future<void> start() => (super.noSuchMethod(
         Invocation.method(
           #start,
           [],
         ),
-        returnValue: _i19.Future<void>.value(),
-        returnValueForMissingStub: _i19.Future<void>.value(),
-      ) as _i19.Future<void>);
+        returnValue: _i20.Future<void>.value(),
+        returnValueForMissingStub: _i20.Future<void>.value(),
+      ) as _i20.Future<void>);
 }
 
 /// A class which mocks [PubSub].
 ///
 /// See the documentation for Mockito's code generation for more information.
-class MockPubSub extends _i1.Mock implements _i22.PubSub {
+class MockPubSub extends _i1.Mock implements _i23.PubSub {
   MockPubSub() {
     _i1.throwOnMissingStub(this);
   }
@@ -435,10 +447,10 @@ class MockPubSub extends _i1.Mock implements _i22.PubSub {
       ) as _i12.PeerScoreParams);
 
   @override
-  Map<_i2.PeerId, _i23.PeerScore> get peerScores => (super.noSuchMethod(
+  Map<_i2.PeerId, _i24.PeerScore> get peerScores => (super.noSuchMethod(
         Invocation.getter(#peerScores),
-        returnValue: <_i2.PeerId, _i23.PeerScore>{},
-      ) as Map<_i2.PeerId, _i23.PeerScore>);
+        returnValue: <_i2.PeerId, _i24.PeerScore>{},
+      ) as Map<_i2.PeerId, _i24.PeerScore>);
 
   @override
   _i13.PubSubProtocol get comms => (super.noSuchMethod(
@@ -450,13 +462,13 @@ class MockPubSub extends _i1.Mock implements _i22.PubSub {
       ) as _i13.PubSubProtocol);
 
   @override
-  _i24.MessageIdFn get messageIdFn => (super.noSuchMethod(
+  _i25.MessageIdFn get messageIdFn => (super.noSuchMethod(
         Invocation.getter(#messageIdFn),
-        returnValue: (_i25.Message message) => _i26.dummyValue<String>(
+        returnValue: (_i26.Message message) => _i27.dummyValue<String>(
           this,
           Invocation.getter(#messageIdFn),
         ),
-      ) as _i24.MessageIdFn);
+      ) as _i25.MessageIdFn);
 
   @override
   _i14.Subscription subscribe(String? topic) => (super.noSuchMethod(
@@ -474,14 +486,14 @@ class MockPubSub extends _i1.Mock implements _i22.PubSub {
       ) as _i14.Subscription);
 
   @override
-  _i19.Future<void> unsubscribe(String? topic) => (super.noSuchMethod(
+  _i20.Future<void> unsubscribe(String? topic) => (super.noSuchMethod(
         Invocation.method(
           #unsubscribe,
           [topic],
         ),
-        returnValue: _i19.Future<void>.value(),
-        returnValueForMissingStub: _i19.Future<void>.value(),
-      ) as _i19.Future<void>);
+        returnValue: _i20.Future<void>.value(),
+        returnValueForMissingStub: _i20.Future<void>.value(),
+      ) as _i20.Future<void>);
 
   @override
   List<String> getTopics() => (super.noSuchMethod(
@@ -493,7 +505,7 @@ class MockPubSub extends _i1.Mock implements _i22.PubSub {
       ) as List<String>);
 
   @override
-  void registerMessageValidator(_i22.MessageValidator? validator) =>
+  void registerMessageValidator(_i23.MessageValidator? validator) =>
       super.noSuchMethod(
         Invocation.method(
           #registerMessageValidator,
@@ -503,21 +515,21 @@ class MockPubSub extends _i1.Mock implements _i22.PubSub {
       );
 
   @override
-  _i19.Future<_i27.ValidationResult> validateMessage(
-          _i28.PubSubMessage? message) =>
+  _i20.Future<_i28.ValidationResult> validateMessage(
+          _i29.PubSubMessage? message) =>
       (super.noSuchMethod(
         Invocation.method(
           #validateMessage,
           [message],
         ),
-        returnValue: _i19.Future<_i27.ValidationResult>.value(
-            _i27.ValidationResult.accept),
-      ) as _i19.Future<_i27.ValidationResult>);
+        returnValue: _i20.Future<_i28.ValidationResult>.value(
+            _i28.ValidationResult.accept),
+      ) as _i20.Future<_i28.ValidationResult>);
 
   @override
-  _i19.Future<void> publish(
+  _i20.Future<void> publish(
     String? topic,
-    _i29.Uint8List? data,
+    _i30.Uint8List? data,
   ) =>
       (super.noSuchMethod(
         Invocation.method(
@@ -527,32 +539,32 @@ class MockPubSub extends _i1.Mock implements _i22.PubSub {
             data,
           ],
         ),
-        returnValue: _i19.Future<void>.value(),
-        returnValueForMissingStub: _i19.Future<void>.value(),
-      ) as _i19.Future<void>);
+        returnValue: _i20.Future<void>.value(),
+        returnValueForMissingStub: _i20.Future<void>.value(),
+      ) as _i20.Future<void>);
 
   @override
-  _i19.Future<void> start() => (super.noSuchMethod(
+  _i20.Future<void> start() => (super.noSuchMethod(
         Invocation.method(
           #start,
           [],
         ),
-        returnValue: _i19.Future<void>.value(),
-        returnValueForMissingStub: _i19.Future<void>.value(),
-      ) as _i19.Future<void>);
+        returnValue: _i20.Future<void>.value(),
+        returnValueForMissingStub: _i20.Future<void>.value(),
+      ) as _i20.Future<void>);
 
   @override
-  _i19.Future<void> stop() => (super.noSuchMethod(
+  _i20.Future<void> stop() => (super.noSuchMethod(
         Invocation.method(
           #stop,
           [],
         ),
-        returnValue: _i19.Future<void>.value(),
-        returnValueForMissingStub: _i19.Future<void>.value(),
-      ) as _i19.Future<void>);
+        returnValue: _i20.Future<void>.value(),
+        returnValueForMissingStub: _i20.Future<void>.value(),
+      ) as _i20.Future<void>);
 
   @override
-  void deliverMessage(_i28.PubSubMessage? message) => super.noSuchMethod(
+  void deliverMessage(_i29.PubSubMessage? message) => super.noSuchMethod(
         Invocation.method(
           #deliverMessage,
           [message],
@@ -561,7 +573,7 @@ class MockPubSub extends _i1.Mock implements _i22.PubSub {
       );
 
   @override
-  void deliverReceivedMessage(_i28.PubSubMessage? message) =>
+  void deliverReceivedMessage(_i29.PubSubMessage? message) =>
       super.noSuchMethod(
         Invocation.method(
           #deliverReceivedMessage,
@@ -603,11 +615,11 @@ class MockPubSub extends _i1.Mock implements _i22.PubSub {
       )) as double?);
 
   @override
-  _i23.PeerScore? getPeerScoreObject(_i2.PeerId? peerId) =>
+  _i24.PeerScore? getPeerScoreObject(_i2.PeerId? peerId) =>
       (super.noSuchMethod(Invocation.method(
         #getPeerScoreObject,
         [peerId],
-      )) as _i23.PeerScore?);
+      )) as _i24.PeerScore?);
 
   @override
   void refreshScores() => super.noSuchMethod(
@@ -643,13 +655,13 @@ class MockPeerId extends _i1.Mock implements _i2.PeerId {
       ) as _i15.CID);
 
   @override
-  _i29.Uint8List toBytes() => (super.noSuchMethod(
+  _i30.Uint8List toBytes() => (super.noSuchMethod(
         Invocation.method(
           #toBytes,
           [],
         ),
-        returnValue: _i29.Uint8List(0),
-      ) as _i29.Uint8List);
+        returnValue: _i30.Uint8List(0),
+      ) as _i30.Uint8List);
 
   @override
   String toCIDString() => (super.noSuchMethod(
@@ -657,7 +669,7 @@ class MockPeerId extends _i1.Mock implements _i2.PeerId {
           #toCIDString,
           [],
         ),
-        returnValue: _i26.dummyValue<String>(
+        returnValue: _i27.dummyValue<String>(
           this,
           Invocation.method(
             #toCIDString,
@@ -672,7 +684,7 @@ class MockPeerId extends _i1.Mock implements _i2.PeerId {
           #toBase58,
           [],
         ),
-        returnValue: _i26.dummyValue<String>(
+        returnValue: _i27.dummyValue<String>(
           this,
           Invocation.method(
             #toBase58,
@@ -687,7 +699,7 @@ class MockPeerId extends _i1.Mock implements _i2.PeerId {
           #shortString,
           [],
         ),
-        returnValue: _i26.dummyValue<String>(
+        returnValue: _i27.dummyValue<String>(
           this,
           Invocation.method(
             #shortString,
@@ -706,7 +718,7 @@ class MockPeerId extends _i1.Mock implements _i2.PeerId {
       ) as Map<String, dynamic>);
 
   @override
-  bool matchesPublicKey(_i30.PublicKey? publicKey) => (super.noSuchMethod(
+  bool matchesPublicKey(_i31.PublicKey? publicKey) => (super.noSuchMethod(
         Invocation.method(
           #matchesPublicKey,
           [publicKey],
@@ -715,7 +727,7 @@ class MockPeerId extends _i1.Mock implements _i2.PeerId {
       ) as bool);
 
   @override
-  bool matchesPrivateKey(_i30.PrivateKey? privateKey) => (super.noSuchMethod(
+  bool matchesPrivateKey(_i31.PrivateKey? privateKey) => (super.noSuchMethod(
         Invocation.method(
           #matchesPrivateKey,
           [privateKey],
@@ -724,13 +736,13 @@ class MockPeerId extends _i1.Mock implements _i2.PeerId {
       ) as bool);
 
   @override
-  _i19.Future<_i30.PublicKey?> extractPublicKey() => (super.noSuchMethod(
+  _i20.Future<_i31.PublicKey?> extractPublicKey() => (super.noSuchMethod(
         Invocation.method(
           #extractPublicKey,
           [],
         ),
-        returnValue: _i19.Future<_i30.PublicKey?>.value(),
-      ) as _i19.Future<_i30.PublicKey?>);
+        returnValue: _i20.Future<_i31.PublicKey?>.value(),
+      ) as _i20.Future<_i31.PublicKey?>);
 
   @override
   bool isValid() => (super.noSuchMethod(
@@ -760,7 +772,7 @@ class MockEventTracer extends _i1.Mock implements _i11.EventTracer {
   }
 
   @override
-  void trace(_i31.TraceEvent? event) => super.noSuchMethod(
+  void trace(_i32.TraceEvent? event) => super.noSuchMethod(
         Invocation.method(
           #trace,
           [event],
@@ -769,34 +781,34 @@ class MockEventTracer extends _i1.Mock implements _i11.EventTracer {
       );
 
   @override
-  _i19.Future<void> start() => (super.noSuchMethod(
+  _i20.Future<void> start() => (super.noSuchMethod(
         Invocation.method(
           #start,
           [],
         ),
-        returnValue: _i19.Future<void>.value(),
-        returnValueForMissingStub: _i19.Future<void>.value(),
-      ) as _i19.Future<void>);
+        returnValue: _i20.Future<void>.value(),
+        returnValueForMissingStub: _i20.Future<void>.value(),
+      ) as _i20.Future<void>);
 
   @override
-  _i19.Future<void> stop() => (super.noSuchMethod(
+  _i20.Future<void> stop() => (super.noSuchMethod(
         Invocation.method(
           #stop,
           [],
         ),
-        returnValue: _i19.Future<void>.value(),
-        returnValueForMissingStub: _i19.Future<void>.value(),
-      ) as _i19.Future<void>);
+        returnValue: _i20.Future<void>.value(),
+        returnValueForMissingStub: _i20.Future<void>.value(),
+      ) as _i20.Future<void>);
 
   @override
-  _i19.Future<void> dispose() => (super.noSuchMethod(
+  _i20.Future<void> dispose() => (super.noSuchMethod(
         Invocation.method(
           #dispose,
           [],
         ),
-        returnValue: _i19.Future<void>.value(),
-        returnValueForMissingStub: _i19.Future<void>.value(),
-      ) as _i19.Future<void>);
+        returnValue: _i20.Future<void>.value(),
+        returnValueForMissingStub: _i20.Future<void>.value(),
+      ) as _i20.Future<void>);
 }
 
 /// A class which mocks [PubSubProtocol].
@@ -808,9 +820,9 @@ class MockPubSubProtocol extends _i1.Mock implements _i13.PubSubProtocol {
   }
 
   @override
-  _i19.Future<void> sendRpc(
+  _i20.Future<void> sendRpc(
     _i2.PeerId? peerId,
-    _i25.RPC? rpc,
+    _i26.RPC? rpc,
     String? protocolId,
   ) =>
       (super.noSuchMethod(
@@ -822,29 +834,29 @@ class MockPubSubProtocol extends _i1.Mock implements _i13.PubSubProtocol {
             protocolId,
           ],
         ),
-        returnValue: _i19.Future<void>.value(),
-        returnValueForMissingStub: _i19.Future<void>.value(),
-      ) as _i19.Future<void>);
+        returnValue: _i20.Future<void>.value(),
+        returnValueForMissingStub: _i20.Future<void>.value(),
+      ) as _i20.Future<void>);
 
   @override
-  _i19.Future<void> closePeerStream(_i2.PeerId? peerId) => (super.noSuchMethod(
+  _i20.Future<void> closePeerStream(_i2.PeerId? peerId) => (super.noSuchMethod(
         Invocation.method(
           #closePeerStream,
           [peerId],
         ),
-        returnValue: _i19.Future<void>.value(),
-        returnValueForMissingStub: _i19.Future<void>.value(),
-      ) as _i19.Future<void>);
+        returnValue: _i20.Future<void>.value(),
+        returnValueForMissingStub: _i20.Future<void>.value(),
+      ) as _i20.Future<void>);
 
   @override
-  _i19.Future<void> close() => (super.noSuchMethod(
+  _i20.Future<void> close() => (super.noSuchMethod(
         Invocation.method(
           #close,
           [],
         ),
-        returnValue: _i19.Future<void>.value(),
-        returnValueForMissingStub: _i19.Future<void>.value(),
-      ) as _i19.Future<void>);
+        returnValue: _i20.Future<void>.value(),
+        returnValueForMissingStub: _i20.Future<void>.value(),
+      ) as _i20.Future<void>);
 }
 
 /// A class which mocks [Network].
@@ -856,18 +868,18 @@ class MockNetwork extends _i1.Mock implements _i4.Network {
   }
 
   @override
-  List<_i18.MultiAddr> get listenAddresses => (super.noSuchMethod(
+  List<_i19.MultiAddr> get listenAddresses => (super.noSuchMethod(
         Invocation.getter(#listenAddresses),
-        returnValue: <_i18.MultiAddr>[],
-      ) as List<_i18.MultiAddr>);
+        returnValue: <_i19.MultiAddr>[],
+      ) as List<_i19.MultiAddr>);
 
   @override
-  _i19.Future<List<_i18.MultiAddr>> get interfaceListenAddresses =>
+  _i20.Future<List<_i19.MultiAddr>> get interfaceListenAddresses =>
       (super.noSuchMethod(
         Invocation.getter(#interfaceListenAddresses),
         returnValue:
-            _i19.Future<List<_i18.MultiAddr>>.value(<_i18.MultiAddr>[]),
-      ) as _i19.Future<List<_i18.MultiAddr>>);
+            _i20.Future<List<_i19.MultiAddr>>.value(<_i19.MultiAddr>[]),
+      ) as _i20.Future<List<_i19.MultiAddr>>);
 
   @override
   _i16.ResourceManager get resourceManager => (super.noSuchMethod(
@@ -909,19 +921,19 @@ class MockNetwork extends _i1.Mock implements _i4.Network {
       ) as List<_i17.Conn>);
 
   @override
-  _i19.Future<void> close() => (super.noSuchMethod(
+  _i20.Future<void> close() => (super.noSuchMethod(
         Invocation.method(
           #close,
           [],
         ),
-        returnValue: _i19.Future<void>.value(),
-        returnValueForMissingStub: _i19.Future<void>.value(),
-      ) as _i19.Future<void>);
+        returnValue: _i20.Future<void>.value(),
+        returnValueForMissingStub: _i20.Future<void>.value(),
+      ) as _i20.Future<void>);
 
   @override
   void setStreamHandler(
     String? protocol,
-    _i19.Future<void> Function(
+    _i20.Future<void> Function(
       dynamic,
       _i2.PeerId,
     )? handler,
@@ -938,8 +950,8 @@ class MockNetwork extends _i1.Mock implements _i4.Network {
       );
 
   @override
-  _i19.Future<_i8.P2PStream<dynamic>> newStream(
-    _i21.Context? context,
+  _i20.Future<_i8.P2PStream<dynamic>> newStream(
+    _i22.Context? context,
     _i2.PeerId? peerId,
   ) =>
       (super.noSuchMethod(
@@ -951,7 +963,7 @@ class MockNetwork extends _i1.Mock implements _i4.Network {
           ],
         ),
         returnValue:
-            _i19.Future<_i8.P2PStream<dynamic>>.value(_FakeP2PStream_6<dynamic>(
+            _i20.Future<_i8.P2PStream<dynamic>>.value(_FakeP2PStream_6<dynamic>(
           this,
           Invocation.method(
             #newStream,
@@ -961,21 +973,21 @@ class MockNetwork extends _i1.Mock implements _i4.Network {
             ],
           ),
         )),
-      ) as _i19.Future<_i8.P2PStream<dynamic>>);
+      ) as _i20.Future<_i8.P2PStream<dynamic>>);
 
   @override
-  _i19.Future<void> listen(List<_i18.MultiAddr>? addrs) => (super.noSuchMethod(
+  _i20.Future<void> listen(List<_i19.MultiAddr>? addrs) => (super.noSuchMethod(
         Invocation.method(
           #listen,
           [addrs],
         ),
-        returnValue: _i19.Future<void>.value(),
-        returnValueForMissingStub: _i19.Future<void>.value(),
-      ) as _i19.Future<void>);
+        returnValue: _i20.Future<void>.value(),
+        returnValueForMissingStub: _i20.Future<void>.value(),
+      ) as _i20.Future<void>);
 
   @override
-  _i19.Future<_i17.Conn> dialPeer(
-    _i21.Context? context,
+  _i20.Future<_i17.Conn> dialPeer(
+    _i22.Context? context,
     _i2.PeerId? peerId,
   ) =>
       (super.noSuchMethod(
@@ -986,7 +998,7 @@ class MockNetwork extends _i1.Mock implements _i4.Network {
             peerId,
           ],
         ),
-        returnValue: _i19.Future<_i17.Conn>.value(_FakeConn_15(
+        returnValue: _i20.Future<_i17.Conn>.value(_FakeConn_15(
           this,
           Invocation.method(
             #dialPeer,
@@ -996,17 +1008,17 @@ class MockNetwork extends _i1.Mock implements _i4.Network {
             ],
           ),
         )),
-      ) as _i19.Future<_i17.Conn>);
+      ) as _i20.Future<_i17.Conn>);
 
   @override
-  _i19.Future<void> closePeer(_i2.PeerId? peerId) => (super.noSuchMethod(
+  _i20.Future<void> closePeer(_i2.PeerId? peerId) => (super.noSuchMethod(
         Invocation.method(
           #closePeer,
           [peerId],
         ),
-        returnValue: _i19.Future<void>.value(),
-        returnValueForMissingStub: _i19.Future<void>.value(),
-      ) as _i19.Future<void>);
+        returnValue: _i20.Future<void>.value(),
+        returnValueForMissingStub: _i20.Future<void>.value(),
+      ) as _i20.Future<void>);
 
   @override
   _i4.Connectedness connectedness(_i2.PeerId? peerId) => (super.noSuchMethod(
@@ -1027,7 +1039,7 @@ class MockNetwork extends _i1.Mock implements _i4.Network {
       ) as List<_i17.Conn>);
 
   @override
-  void notify(_i32.Notifiee? notifiee) => super.noSuchMethod(
+  void notify(_i18.Notifiee? notifiee) => super.noSuchMethod(
         Invocation.method(
           #notify,
           [notifiee],
@@ -1036,7 +1048,7 @@ class MockNetwork extends _i1.Mock implements _i4.Network {
       );
 
   @override
-  void stopNotify(_i32.Notifiee? notifiee) => super.noSuchMethod(
+  void stopNotify(_i18.Notifiee? notifiee) => super.noSuchMethod(
         Invocation.method(
           #stopNotify,
           [notifiee],
@@ -1047,7 +1059,7 @@ class MockNetwork extends _i1.Mock implements _i4.Network {
   @override
   bool canDial(
     _i2.PeerId? peerId,
-    _i18.MultiAddr? addr,
+    _i19.MultiAddr? addr,
   ) =>
       (super.noSuchMethod(
         Invocation.method(
@@ -1061,11 +1073,235 @@ class MockNetwork extends _i1.Mock implements _i4.Network {
       ) as bool);
 
   @override
-  void removeListenAddress(_i18.MultiAddr? addr) => super.noSuchMethod(
+  void removeListenAddress(_i19.MultiAddr? addr) => super.noSuchMethod(
         Invocation.method(
           #removeListenAddress,
           [addr],
         ),
         returnValueForMissingStub: null,
       );
+}
+
+/// A class which mocks [ConnManager].
+///
+/// See the documentation for Mockito's code generation for more information.
+class MockConnManager extends _i1.Mock implements _i6.ConnManager {
+  MockConnManager() {
+    _i1.throwOnMissingStub(this);
+  }
+
+  @override
+  _i18.Notifiee get notifiee => (super.noSuchMethod(
+        Invocation.getter(#notifiee),
+        returnValue: _FakeNotifiee_16(
+          this,
+          Invocation.getter(#notifiee),
+        ),
+      ) as _i18.Notifiee);
+
+  @override
+  void tagPeer(
+    _i2.PeerId? peerId,
+    String? tag,
+    int? value,
+  ) =>
+      super.noSuchMethod(
+        Invocation.method(
+          #tagPeer,
+          [
+            peerId,
+            tag,
+            value,
+          ],
+        ),
+        returnValueForMissingStub: null,
+      );
+
+  @override
+  void untagPeer(
+    _i2.PeerId? peerId,
+    String? tag,
+  ) =>
+      super.noSuchMethod(
+        Invocation.method(
+          #untagPeer,
+          [
+            peerId,
+            tag,
+          ],
+        ),
+        returnValueForMissingStub: null,
+      );
+
+  @override
+  void upsertTag(
+    _i2.PeerId? peerId,
+    String? tag,
+    int Function(int)? upsert,
+  ) =>
+      super.noSuchMethod(
+        Invocation.method(
+          #upsertTag,
+          [
+            peerId,
+            tag,
+            upsert,
+          ],
+        ),
+        returnValueForMissingStub: null,
+      );
+
+  @override
+  _i6.TagInfo? getTagInfo(_i2.PeerId? peerId) =>
+      (super.noSuchMethod(Invocation.method(
+        #getTagInfo,
+        [peerId],
+      )) as _i6.TagInfo?);
+
+  @override
+  _i20.Future<void> trimOpenConns() => (super.noSuchMethod(
+        Invocation.method(
+          #trimOpenConns,
+          [],
+        ),
+        returnValue: _i20.Future<void>.value(),
+        returnValueForMissingStub: _i20.Future<void>.value(),
+      ) as _i20.Future<void>);
+
+  @override
+  void protect(
+    _i2.PeerId? peerId,
+    String? tag,
+  ) =>
+      super.noSuchMethod(
+        Invocation.method(
+          #protect,
+          [
+            peerId,
+            tag,
+          ],
+        ),
+        returnValueForMissingStub: null,
+      );
+
+  @override
+  bool unprotect(
+    _i2.PeerId? peerId,
+    String? tag,
+  ) =>
+      (super.noSuchMethod(
+        Invocation.method(
+          #unprotect,
+          [
+            peerId,
+            tag,
+          ],
+        ),
+        returnValue: false,
+      ) as bool);
+
+  @override
+  bool isProtected(
+    _i2.PeerId? peerId,
+    String? tag,
+  ) =>
+      (super.noSuchMethod(
+        Invocation.method(
+          #isProtected,
+          [
+            peerId,
+            tag,
+          ],
+        ),
+        returnValue: false,
+      ) as bool);
+
+  @override
+  String? checkLimit(_i6.GetConnLimiter? limiter) =>
+      (super.noSuchMethod(Invocation.method(
+        #checkLimit,
+        [limiter],
+      )) as String?);
+
+  @override
+  _i20.Future<void> close() => (super.noSuchMethod(
+        Invocation.method(
+          #close,
+          [],
+        ),
+        returnValue: _i20.Future<void>.value(),
+        returnValueForMissingStub: _i20.Future<void>.value(),
+      ) as _i20.Future<void>);
+
+  @override
+  void registerConnection(_i33.TransportConn? conn) => super.noSuchMethod(
+        Invocation.method(
+          #registerConnection,
+          [conn],
+        ),
+        returnValueForMissingStub: null,
+      );
+
+  @override
+  void updateState(
+    _i33.TransportConn? conn,
+    _i34.ConnectionState? state, {
+    required Object? error,
+  }) =>
+      super.noSuchMethod(
+        Invocation.method(
+          #updateState,
+          [
+            conn,
+            state,
+          ],
+          {#error: error},
+        ),
+        returnValueForMissingStub: null,
+      );
+
+  @override
+  _i34.ConnectionState? getState(_i33.TransportConn? conn) =>
+      (super.noSuchMethod(Invocation.method(
+        #getState,
+        [conn],
+      )) as _i34.ConnectionState?);
+
+  @override
+  void recordActivity(_i33.TransportConn? tcpConnection) => super.noSuchMethod(
+        Invocation.method(
+          #recordActivity,
+          [tcpConnection],
+        ),
+        returnValueForMissingStub: null,
+      );
+
+  @override
+  _i20.Future<void> dispose() => (super.noSuchMethod(
+        Invocation.method(
+          #dispose,
+          [],
+        ),
+        returnValue: _i20.Future<void>.value(),
+        returnValueForMissingStub: _i20.Future<void>.value(),
+      ) as _i20.Future<void>);
+
+  @override
+  _i20.Stream<_i34.ConnectionStateChange>? getStateStream(
+          _i33.TransportConn? conn) =>
+      (super.noSuchMethod(Invocation.method(
+        #getStateStream,
+        [conn],
+      )) as _i20.Stream<_i34.ConnectionStateChange>?);
+
+  @override
+  _i20.Future<void> closeConnection(_i33.TransportConn? conn) =>
+      (super.noSuchMethod(
+        Invocation.method(
+          #closeConnection,
+          [conn],
+        ),
+        returnValue: _i20.Future<void>.value(),
+        returnValueForMissingStub: _i20.Future<void>.value(),
+      ) as _i20.Future<void>);
 }

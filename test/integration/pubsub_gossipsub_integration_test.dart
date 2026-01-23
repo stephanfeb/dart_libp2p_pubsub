@@ -57,6 +57,7 @@ void main() {
       pubsub = PubSub(
         mockHost, // Use MockHost
         router,
+        privateKey: keyPair.privateKey
       );
       await pubsub.start(); // Start PubSub
       await router.start(); // Start Router

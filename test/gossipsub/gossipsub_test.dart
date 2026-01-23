@@ -16,19 +16,21 @@ import 'package:dart_libp2p_pubsub/src/gossipsub/score_params.dart'; // For Peer
 import 'package:dart_libp2p/core/host/host.dart';
 import 'package:dart_libp2p/core/peer/peer_id.dart';
 import 'package:dart_libp2p/core/network/network.dart'; // Added Network import
+import 'package:dart_libp2p/core/connmgr/conn_manager.dart'; // For ConnManager
 import 'package:mockito/mockito.dart';
 import 'package:mockito/annotations.dart';
 import 'package:fake_async/fake_async.dart'; // Import for FakeAsync
 import 'gossipsub_test.mocks.dart'; // Generated mocks
 
 // Use build_runner: dart pub run build_runner build --delete-conflicting-outputs
-@GenerateMocks([Host, PubSub, PeerId, EventTracer, PubSubProtocol, Network]) // Added Network
+@GenerateMocks([Host, PubSub, PeerId, EventTracer, PubSubProtocol, Network, ConnManager]) // Added ConnManager
 void main() {
   group('GossipSubRouter', () {
     late GossipSubRouter router;
     late MockPubSub mockPubsub;
     late MockHost mockHost;
     late MockNetwork mockNetwork; // Added MockNetwork declaration
+    late MockConnManager mockConnManager; // Added MockConnManager declaration
     late MockPeerId mockLocalPeerId;
     late MockEventTracer mockTracer;
     late MockPubSubProtocol mockComms;
@@ -38,6 +40,7 @@ void main() {
       mockHost = MockHost();
       mockPubsub = MockPubSub();
       mockNetwork = MockNetwork(); // Initialize MockNetwork
+      mockConnManager = MockConnManager(); // Initialize MockConnManager
       mockLocalPeerId = MockPeerId();
       // Use a minimal valid identity multihash: identity func (0x00), 1 byte len (0x01), value 0x01
       when(mockLocalPeerId.toBytes()).thenReturn(Uint8List.fromList([0x00, 0x01, 0x01])); 
@@ -49,7 +52,10 @@ void main() {
       when(mockPubsub.host).thenReturn(mockHost);
       when(mockHost.id).thenReturn(mockLocalPeerId); // PubSub uses host.id
       when(mockHost.network).thenReturn(mockNetwork); // Stub host.network
+      when(mockHost.connManager).thenReturn(mockConnManager); // Stub host.connManager
       when(mockNetwork.peers).thenReturn([]); // Default stub for network.peers
+      when(mockConnManager.protect(any, any)).thenReturn(null); // Stub protect
+      when(mockConnManager.unprotect(any, any)).thenReturn(true); // Stub unprotect
       when(mockPubsub.comms).thenReturn(mockComms);
       when(mockPubsub.tracer).thenReturn(mockTracer);
       when(mockPubsub.getTopics()).thenReturn([]); // Default behavior
@@ -338,10 +344,10 @@ void main() {
         // Verify RECV_RPC trace
         final capturedTraces = verify(mockTracer.trace(captureAny)).captured;
         final recvRpcTrace = capturedTraces.firstWhere(
-          (e) => (e as trace_pb.TraceEvent).type == trace_pb.TraceEvent_Type.RECV_RPC &&
-                 (e as trace_pb.TraceEvent).peerID == mockRpcPeerId.toBytes(),
+          (e) => e.type == trace_pb.TraceEvent_Type.RECV_RPC &&
+                 e.peerID == mockRpcPeerId.toBytes(),
           orElse: () => null
-        ) as trace_pb.TraceEvent?;
+        );
         expect(recvRpcTrace, isNotNull, reason: "RECV_RPC for IHAVE not found");
 
         // Verify that sendRpc was called on mockComms (via rpcQueueManager)
@@ -359,10 +365,10 @@ void main() {
         // The more important check is that mockComms.sendRpc was called with an actual IWANT.
         // The trace for SEND_RPC might be missing detailed control metadata due to the bug.
         final sendRpcTrace = capturedTraces.firstWhere(
-          (e) => (e as trace_pb.TraceEvent).type == trace_pb.TraceEvent_Type.SEND_RPC &&
-                 (e as trace_pb.TraceEvent).sendRPC.sendTo == mockRpcPeerId.toBytes(),
+          (e) => e.type == trace_pb.TraceEvent_Type.SEND_RPC &&
+                 e.sendRPC.sendTo == mockRpcPeerId.toBytes(),
           orElse: () => null
-        ) as trace_pb.TraceEvent?;
+        );
         expect(sendRpcTrace, isNotNull, reason: "SEND_RPC trace for IWANT response not found");
         // If the bug in gossipsub.dart trace population is fixed, this can be more specific:
         // expect(sendRpcTrace.sendRPC.meta.hasControl(), isTrue);
@@ -370,7 +376,6 @@ void main() {
       });
 
       test('handleRpc with IHAVE for known messages should not respond with IWANT', () async {
-        const knownMsgId1 = 'known-msg-id-1';
         // Simulate that the router has seen this message by putting it in mcache
         // This requires publishing a message or directly manipulating mcache if possible.
         // For simplicity, we'll assume mcache.seen() is the key.
@@ -513,11 +518,11 @@ void main() {
 
         // Verify SEND_RPC trace for the PUBLISH message
         final sendRpcTrace = capturedTraces.firstWhere(
-          (e) => (e as trace_pb.TraceEvent).type == trace_pb.TraceEvent_Type.SEND_RPC &&
-                 (e as trace_pb.TraceEvent).sendRPC.sendTo == mockRpcPeerId.toBytes() &&
-                 (e as trace_pb.TraceEvent).sendRPC.meta.messages.isNotEmpty,
+          (e) => e.type == trace_pb.TraceEvent_Type.SEND_RPC &&
+                 e.sendRPC.sendTo == mockRpcPeerId.toBytes() &&
+                 e.sendRPC.meta.messages.isNotEmpty,
           orElse: () => null
-        ) as trace_pb.TraceEvent?;
+        );
         expect(sendRpcTrace, isNotNull, reason: "SEND_RPC for PUBLISH (IWANT response) not found");
         expect(sendRpcTrace!.sendRPC.meta.messages.length, equals(2));
       });
@@ -752,7 +757,7 @@ void main() {
         when(mockTracer.trace(any)).thenAnswer((_) => {});
         when(mockComms.sendRpc(any, any, any)).thenAnswer((_) async {});
         // Default validation to accept
-        when(mockPubsub.validateMessage(any)).thenReturn(ValidationResult.accept);
+        when(mockPubsub.validateMessage(any)).thenAnswer((_) async => ValidationResult.accept);
         when(mockPubsub.deliverMessage(any)).thenAnswer((_) {}); // Default for deliver
         when(mockPubsub.messageIdFn).thenReturn(defaultMessageIdFn); // Ensure router uses the same ID fn
          // Re-stub other pubsub interactions that might have been cleared and are needed by router
@@ -791,6 +796,9 @@ void main() {
 
         // 2. Action: Handle incoming RPC with the message
         await router.handleRpc(mockSendingPeer, incomingRpc);
+
+        // Wait for async RPC queue to flush (PeerRpcQueue uses Future.microtask for sending)
+        await Future.delayed(Duration.zero);
 
         // 3. Verification
         // Verify message delivered locally - THIS IS NO LONGER EXPECTED FROM ROUTER
@@ -852,7 +860,7 @@ void main() {
 
         when(mockPubsub.getPeerScore(any)).thenReturn(0.0); // Ensure scores are fine
         // Ensure validateMessage is stubbed to accept for both passes
-        when(mockPubsub.validateMessage(any)).thenReturn(ValidationResult.accept);
+        when(mockPubsub.validateMessage(any)).thenAnswer((_) async => ValidationResult.accept);
         when(mockPubsub.messageIdFn).thenReturn(defaultMessageIdFn);
 
 
@@ -868,8 +876,11 @@ void main() {
         // when(mockPubsub.deliverMessage(any)).thenAnswer((_) {
         //   firstPassDelivered = true;
         // });
-        
+
         await router.handleRpc(mockSendingPeer, incomingRpc);
+
+        // Wait for async RPC queue to flush (PeerRpcQueue uses Future.microtask for sending)
+        await Future.delayed(Duration.zero);
 
         // Verify first pass actions (optional, but good for sanity)
         // Check that it was forwarded to the other mesh peer.
@@ -896,7 +907,7 @@ void main() {
         when(mockPubsub.tracer).thenReturn(mockTracer); // Needed by router
         when(mockPubsub.getTopics()).thenReturn([testTopicName]); // For _shouldProcessMessage
         when(mockPubsub.getPeerScore(any)).thenReturn(0.0);
-        when(mockPubsub.validateMessage(any)).thenReturn(ValidationResult.accept); // Still need validation before duplicate check
+        when(mockPubsub.validateMessage(any)).thenAnswer((_) async => ValidationResult.accept); // Still need validation before duplicate check
         when(mockPubsub.messageIdFn).thenReturn(defaultMessageIdFn);
         when(mockPubsub.deliverMessage(any)).thenAnswer((_) { // This should NOT be called for duplicate
           fail('deliverMessage should not be called for a duplicate message');
@@ -953,7 +964,7 @@ void main() {
         when(mockPubsub.messageIdFn).thenReturn(defaultMessageIdFn);
 
         // Stub validateMessage to REJECT
-        when(mockPubsub.validateMessage(any)).thenReturn(ValidationResult.reject);
+        when(mockPubsub.validateMessage(any)).thenAnswer((_) async => ValidationResult.reject);
 
         // Ensure deliverMessage and sendRpc are not called
         when(mockPubsub.deliverMessage(any)).thenAnswer((_) {
@@ -1085,7 +1096,7 @@ void main() {
         // Re-stub default behaviors
         when(mockTracer.trace(any)).thenAnswer((_) => {});
         when(mockComms.sendRpc(any, any, any)).thenAnswer((_) async {});
-        when(mockPubsub.validateMessage(any)).thenReturn(ValidationResult.accept);
+        when(mockPubsub.validateMessage(any)).thenAnswer((_) async => ValidationResult.accept);
         when(mockPubsub.deliverMessage(any)).thenAnswer((_) {});
         when(mockPubsub.messageIdFn).thenReturn(defaultMessageIdFn);
         when(mockPubsub.host).thenReturn(mockHost);
@@ -1517,17 +1528,17 @@ void main() {
           when(mockCandidateFanout2.toBase58()).thenReturn('QmCandFanout2');
           when(mockPubsub.getPeerScore(mockCandidateFanout2)).thenReturn(7.0);
           
-          final mockCandidateFanout3_badScore = MockPeerId();
-          when(mockCandidateFanout3_badScore.toBytes()).thenReturn(Uint8List.fromList([102,1,3]));
-          when(mockCandidateFanout3_badScore.toBase58()).thenReturn('QmCandFanout3Bad');
-          when(mockPubsub.getPeerScore(mockCandidateFanout3_badScore)).thenReturn(-1.0); // Bad score
+          final mockCandidateFanout3BadScore = MockPeerId();
+          when(mockCandidateFanout3BadScore.toBytes()).thenReturn(Uint8List.fromList([102,1,3]));
+          when(mockCandidateFanout3BadScore.toBase58()).thenReturn('QmCandFanout3Bad');
+          when(mockPubsub.getPeerScore(mockCandidateFanout3BadScore)).thenReturn(-1.0); // Bad score
 
           when(mockNetwork.peers).thenReturn([
             mockLocalPeerId,
             mockExistingFanoutPeer,
             mockCandidateFanout1,
             mockCandidateFanout2,
-            mockCandidateFanout3_badScore
+            mockCandidateFanout3BadScore
           ]);
           
           testRouter.start();
@@ -1540,7 +1551,7 @@ void main() {
             mockCandidateFanout1, 
             mockCandidateFanout2
           ]));
-          expect(testRouter.fanout[fanoutFillTopic], isNot(contains(mockCandidateFanout3_badScore)));
+          expect(testRouter.fanout[fanoutFillTopic], isNot(contains(mockCandidateFanout3BadScore)));
 
           testRouter.stop();
         });

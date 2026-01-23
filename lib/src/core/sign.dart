@@ -54,12 +54,9 @@ Future<void> signMessage(pb.Message message, PrivateKey localPrivateKey) async {
   final signature = await localPrivateKey.sign(payload);
   message.signature = signature;
 
-  // 4. Optionally, include the public key if the recipient might not have it
-  //    or if the signature scheme requires it (e.g., for certain key types).
-  //    The pb.Message has a `key` field for this.
-  //    message.key = localPrivateKey.publicKey.bytes; // If needed.
-  //    For now, we assume the 'from' field (PeerId) is sufficient for the
-  //    verifier to obtain the public key.
+  // 4. Include the public key in the message for verification.
+  //    Required for strict signature validation.
+  message.key = localPrivateKey.publicKey.raw;
 
   print('Message signed. Signature length: ${signature.length}');
 }

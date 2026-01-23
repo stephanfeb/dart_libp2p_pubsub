@@ -49,7 +49,12 @@ class _NodeWithGossipSub {
     final router = GossipSubRouter();
     // The PubSub constructor takes host and router.
     // It internally calls router.attach(this).
-    helper.pubsub = PubSub(helper.host, router);
+    // Pass privateKey for message signing.
+    helper.pubsub = PubSub(
+      helper.host,
+      router,
+      privateKey: helper.nodeDetails.keyPair.privateKey,
+    );
 
     // pubsub.start() will be called separately in test's setUp.
     // This will start both the PubSub service and its attached router.

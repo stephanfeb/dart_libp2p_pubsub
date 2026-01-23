@@ -42,7 +42,11 @@ Future<(MockHost, PubSub, GossipSubRouter)> createNode(TestNetworkManager manage
   manager.registerNetwork(peerId, host.network as MockNetwork);
 
   final router = GossipSubRouter();
-  final pubsub = PubSub(host, router); // Now PubSubProtocol will register its handler correctly
+  final pubsub = PubSub(
+    host,
+    router,
+    privateKey: keyPair.privateKey,
+  ); // Now PubSubProtocol will register its handler correctly
   await pubsub.start();
   await router.start(); 
   return (host, pubsub, router);

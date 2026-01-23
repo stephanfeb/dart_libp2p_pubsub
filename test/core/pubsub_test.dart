@@ -143,7 +143,9 @@ class _MockStreamSink implements StreamSink<List<int>> {
 
 class MockHost implements Host {
   late final PeerId _peerId;
-  late final KeyPair _keyPair; // Store keypair for potential future use in mock
+  late final KeyPair _keyPair;
+
+  KeyPair get keyPair => _keyPair; // Store keypair for potential future use in mock
 
   // Asynchronous initialization block for _peerId and _keyPair
   // This is tricky for a constructor. We'll make `create` static async factory.
@@ -273,7 +275,7 @@ class MockRouter implements Router {
 
 void main() {
   group('PubSub Core Logic Tests', () {
-    late Host mockHost; // Keep as Host type
+    late MockHost mockHost; // Keep as Host type
     late Router mockRouter;
     late PubSub pubsub;
 
@@ -282,7 +284,7 @@ void main() {
       mockRouter = MockRouter();
       // Initialize PubSub with mocks
       // Assuming PubSub constructor takes Host and Router
-      pubsub = PubSub(mockHost, mockRouter); 
+      pubsub = PubSub(mockHost, mockRouter, privateKey: mockHost.keyPair.privateKey);
     });
 
     test('should allow subscription to a topic', () {

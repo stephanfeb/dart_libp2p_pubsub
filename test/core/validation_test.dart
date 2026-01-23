@@ -180,6 +180,14 @@ void main() {
         await signMessage(msg, signerKeyPair.privateKey);
       }
 
+      // signMessage() always sets msg.key, so we need to adjust after signing
+      if (!includeKey) {
+        msg.key = Uint8List(0);
+      } else if (overrideKey != null) {
+        // Apply the override key after signing (signMessage overwrites msg.key)
+        msg.key = overrideKey;
+      }
+
       return PubSubMessage(rpcMessage: msg, receivedFrom: from);
     }
 

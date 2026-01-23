@@ -4,14 +4,16 @@ import 'dart:typed_data'; // For Uint8List, ByteData, Endian
 
 import 'package:dart_libp2p/core/host/host.dart';
 import 'package:dart_libp2p/core/peer/peer_id.dart';
+import 'package:dart_libp2p/core/crypto/keys.dart'; // For PrivateKey
 import '../pb/rpc.pb.dart' as pb;
 
 import 'subscription.dart';
 import 'router.dart';
 import 'comm.dart';
 import 'message.dart'; // For PubSubMessage used in publish
+import 'sign.dart'; // For signMessage
 // Ensure ValidationResult and validateFullMessage are available
-import 'validation.dart'; 
+import 'validation.dart';
 import '../tracing/tracer.dart'; // For EventTracer
 // NoOpEventTracer is in tracer.dart, so json_tracer.dart import might not be needed for default.
 // import '../tracing/impl/json_tracer.dart'; 
@@ -41,8 +43,9 @@ typedef MessageValidator = bool Function(String topic, dynamic message);
 class PubSub {
   final Host host;
   final Router router;
-  final EventTracer tracer; // Added tracer field
+  final EventTracer tracer;
   final PeerScoreParams scoreParams;
+  final PrivateKey? _privateKey; // For signing outgoing messages
   late final PubSubProtocol _comms;
   late final MessageIdGenerator _idGenerator; // For generating sequence numbers
 
@@ -52,7 +55,8 @@ class PubSub {
   PubSubProtocol get comms => _comms;
 
   // TODO: Consider making PubSub an async initializable class if attach needs to be awaited.
-  PubSub(this.host, this.router, {EventTracer? tracer, PeerScoreParams? scoreParams}) : 
+  PubSub(this.host, this.router, {PrivateKey? privateKey, EventTracer? tracer, PeerScoreParams? scoreParams}) :
+    _privateKey = privateKey,
     this.tracer = tracer ?? const NoOpEventTracer(),
     this.scoreParams = scoreParams ?? PeerScoreParams.defaultParams,
     _idGenerator = MessageIdGenerator() { // Initialize the ID generator
@@ -214,8 +218,11 @@ class PubSub {
       ..data = data
       ..seqno = seqno
       ..topic = topic;
-    // TODO: Sign the pbMsg if signing is enabled.
-    // await signMessage(pbMsg, this.host.privateKey); // Assuming host has privateKey
+
+    // Sign the message if privateKey is available
+    if (_privateKey != null) {
+      await signMessage(pbMsg, _privateKey!);
+    }
 
     final pubSubMessage = PubSubMessage(
       rpcMessage: pbMsg,
