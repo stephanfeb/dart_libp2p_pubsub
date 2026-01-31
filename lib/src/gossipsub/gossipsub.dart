@@ -75,6 +75,9 @@ class GossipSubRouter implements Router {
   /// topic -> DateTime
   final Map<String, DateTime> fanoutLastPublished = {};
 
+  /// Tracks which topics each peer is subscribed to.
+  final Map<PeerId, Set<String>> _peerTopics = {};
+
   // TODO: Add other GossipSub specific fields:
   // - Seen cache (for IHAVE messages / control message IDs)
   // - Peer scores
@@ -269,10 +272,18 @@ class GossipSubRouter implements Router {
 
     if (rpc.subscriptions.isNotEmpty) {
       for (final subOpt in rpc.subscriptions) {
+        final topicId = subOpt.topicid;
         if (subOpt.subscribe) {
-          print('GossipSubRouter: Received SUBSCRIBE from $peerId for topic ${subOpt.topicid}');
+          print('GossipSubRouter: Received SUBSCRIBE from $peerId for topic $topicId');
+          // Track peer's subscription and add to mesh if we also subscribe to this topic
+          _peerTopics.putIfAbsent(peerId, () => <String>{}).add(topicId);
+          if (mesh.containsKey(topicId)) {
+            mesh[topicId]!.add(peerId);
+          }
         } else {
-          print('GossipSubRouter: Received UNSUBSCRIBE from $peerId for topic ${subOpt.topicid}');
+          print('GossipSubRouter: Received UNSUBSCRIBE from $peerId for topic $topicId');
+          _peerTopics[peerId]?.remove(topicId);
+          mesh[topicId]?.remove(peerId);
         }
       }
     }

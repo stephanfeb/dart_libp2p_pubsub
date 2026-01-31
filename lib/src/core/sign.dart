@@ -1,33 +1,25 @@
+import 'dart:convert';
 import 'dart:typed_data';
 
-import 'package:dart_libp2p/core/crypto/ed25519.dart';
-import 'package:dart_libp2p/core/peer/peer_id.dart';
-import 'package:dart_libp2p/core/crypto/keys.dart'; // For PrivateKey, PublicKey
-// May also need specific crypto algorithm imports if not covered by keys.dart
+import 'package:dart_libp2p/core/crypto/keys.dart';
+import 'package:dart_libp2p/core/crypto/pb/crypto.pb.dart' as crypto_pb;
 
-import '../pb/rpc.pb.dart' as pb; // For pb.Message
-import 'message.dart'; // For PubSubMessage, if we operate on it directly
+import '../pb/rpc.pb.dart' as pb;
+import 'message.dart';
 
-// The message fields that are typically included in the signature.
-// This should match how go-libp2p-pubsub constructs the payload for signing.
-// Usually: from, data, seqno, topicIDs (or topic in our case).
-// The exact byte representation matters.
+/// The signing prefix used by go-libp2p-pubsub.
+const String _signPrefix = 'libp2p-pubsub:';
+
+/// Constructs the signing payload matching go-libp2p-pubsub:
+/// "libp2p-pubsub:" + protobuf(message with signature and key cleared).
 Uint8List constructMessageSigningPayload(pb.Message message) {
-  // Placeholder: This needs to be a canonical serialization of the fields to be signed.
-  // Example structure (order and exact fields matter):
-  // Bytes from: message.from
-  // Bytes data: message.data
-  // Bytes seqno: message.seqno
-  // Bytes topic: message.topic.codeUnits (UTF-8 of topic string)
-
-  // This is a simplified concatenation. Real implementation needs precise byte construction.
-  final List<int> payloadBytes = [];
-  payloadBytes.addAll(message.from);
-  payloadBytes.addAll(message.data);
-  payloadBytes.addAll(message.seqno);
-  payloadBytes.addAll(message.topic.codeUnits); // UTF-8 bytes of the topic string
-
-  return Uint8List.fromList(payloadBytes);
+  // Create a copy without signature/key fields by round-tripping through protobuf
+  final copy = pb.Message.fromBuffer(message.writeToBuffer());
+  copy.clearSignature();
+  copy.clearKey();
+  final msgBytes = copy.writeToBuffer();
+  final prefix = utf8.encode(_signPrefix);
+  return Uint8List.fromList([...prefix, ...msgBytes]);
 }
 
 /// Signs a PubSub RPC Message using the local node's private key.
@@ -54,11 +46,8 @@ Future<void> signMessage(pb.Message message, PrivateKey localPrivateKey) async {
   final signature = await localPrivateKey.sign(payload);
   message.signature = signature;
 
-  // 4. Include the public key in the message for verification.
-  //    Required for strict signature validation.
-  message.key = localPrivateKey.publicKey.raw;
-
-  print('Message signed. Signature length: ${signature.length}');
+  // 4. Include the protobuf-wrapped public key (matches go-libp2p format).
+  message.key = localPrivateKey.publicKey.marshal();
 }
 
 /// Verifies the signature of a received PubSubMessage.
@@ -92,23 +81,21 @@ Future<bool> verifyMessageSignature(PubSubMessage pubsubMessage) async {
     // For now, we assume we can get a PublicKey object from senderPeerId.
     // If rpcMessage.key is populated, that should be preferred.
     if (rpcMessage.key.isNotEmpty) {
-      // Assuming PublicKey.deserialize or similar exists for unmarshalling.
-      // This might also be specific to key types, e.g., Ed25519PublicKey.fromBytes().
-      // Assuming a top-level unmarshalPublicKey function from the crypto library.
-      publicKey = Ed25519PublicKey.fromRawBytes(Uint8List.fromList(rpcMessage.key));
+      // Unmarshal protobuf-wrapped public key (matches go-libp2p format)
+      final pbKey = crypto_pb.PublicKey.fromBuffer(rpcMessage.key);
+      publicKey = publicKeyFromProto(pbKey);
     } else {
-      // This is a simplification. Extracting public key from PeerId bytes
-      // without knowing the key type embedded in those bytes is non-trivial.
-      // Libp2p PeerIds often embed a multihash of the public key.
-      // We'd need a way to get the actual PublicKey object.
-      // For Ed25519, PeerId bytes might be directly related to public key bytes
-      // after multihash prefix.
-      // This is a MAJOR TODO and placeholder.
-      print('Verification: TODO - Public key extraction from PeerId ${senderPeerId.toBase58()} or rpcMessage.key is complex.');
-      // Attempting a hypothetical extraction for demonstration:
-      // publicKey = await someCryptoUtil.publicKeyFromPeerId(senderPeerId);
-      // If this fails, verification fails.
-      return false; // Cannot verify without a public key.
+      // Try to extract public key from PeerId (works for identity multihash PeerIds)
+      try {
+        publicKey = await senderPeerId.extractPublicKey();
+        if (publicKey == null) {
+          print('Verification: Cannot extract public key from PeerId ${senderPeerId.toBase58()}');
+          return false;
+        }
+      } catch (_) {
+        print('Verification: Cannot extract public key from PeerId ${senderPeerId.toBase58()}');
+        return false;
+      }
     }
   } catch (e) {
     print('Verification: Error obtaining public key for ${senderPeerId.toBase58()}: $e');

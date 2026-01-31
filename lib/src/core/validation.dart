@@ -1,11 +1,10 @@
-import 'message.dart'; // For PubSubMessage
-import '../pb/rpc.pb.dart' as pb; // For pb.Message
-import 'package:dart_libp2p/core/peer/peer_id.dart'; // For PeerId
-import 'package:dart_libp2p/core/crypto/ed25519.dart'; // For Ed25519PublicKey
-import 'package:dart_libp2p/core/crypto/keys.dart'; // For PublicKey
-import 'sign.dart'; // For verifyMessageSignature
+import 'message.dart';
+import 'package:dart_libp2p/core/peer/peer_id.dart';
+import 'package:dart_libp2p/core/crypto/keys.dart';
+import 'package:dart_libp2p/core/crypto/pb/crypto.pb.dart' as crypto_pb;
+import 'sign.dart';
 
-import 'dart:typed_data'; // For Uint8List
+import 'dart:typed_data';
 
 // Default maximum size for a pubsub message, in bytes.
 // (1MB as in go-libp2p-pubsub)
@@ -85,21 +84,29 @@ Future<ValidationResult> validateMessageSignature(PubSubMessage message) async {
     return ValidationResult.reject;
   }
 
-  // 2. Require public key in message for verification
-  if (rpcMessage.key.isEmpty) {
-    print('Validation: Message from ${message.from.toBase58()} rejected - missing public key');
-    return ValidationResult.reject;
+  // 2. Extract public key from message or from sender's PeerId
+  PublicKey publicKey;
+  if (rpcMessage.key.isNotEmpty) {
+    // Parse the protobuf-wrapped public key from the message
+    try {
+      final pbKey = crypto_pb.PublicKey.fromBuffer(rpcMessage.key);
+      publicKey = publicKeyFromProto(pbKey);
+    } catch (e) {
+      print('Validation: Message from ${message.from.toBase58()} rejected - invalid public key format: $e');
+      return ValidationResult.reject;
+    }
+  } else {
+    // Key not in message — try to extract from sender's PeerId (works for Ed25519 inline keys)
+    final senderPeerId = message.from;
+    final extracted = await senderPeerId.extractPublicKey();
+    if (extracted == null) {
+      print('Validation: Message from ${senderPeerId.toBase58()} rejected - no key in message and cannot extract from PeerId');
+      return ValidationResult.reject;
+    }
+    publicKey = extracted;
   }
 
   // 3. KEY-PEERID CONSISTENCY CHECK
-  // Parse the public key from the message
-  PublicKey publicKey;
-  try {
-    publicKey = Ed25519PublicKey.fromRawBytes(Uint8List.fromList(rpcMessage.key));
-  } catch (e) {
-    print('Validation: Message from ${message.from.toBase58()} rejected - invalid public key format: $e');
-    return ValidationResult.reject;
-  }
 
   // Verify the public key matches the claimed sender PeerId
   final senderPeerId = message.from;

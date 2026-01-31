@@ -61,6 +61,10 @@ class PubSub {
     this.scoreParams = scoreParams ?? PeerScoreParams.defaultParams,
     _idGenerator = MessageIdGenerator() { // Initialize the ID generator
     _comms = PubSubProtocol(host, _handleRpc);
+    _comms.onNewInboundPeer = (peerId) {
+      // When a new GossipSub peer connects, send our subscriptions
+      announceSubscriptionsTo(peerId);
+    };
     // It's important that the router is attached so it can also set up its
     // own protocol handlers or react to PubSub initialization.
     router.attach(this).then((_) {
@@ -135,8 +139,41 @@ class PubSub {
     subscription = Subscription(topic, cancelSubscriptionCallback);
     _subscriptions[topic]!.add(subscription);
 
+    // Announce subscription to all connected GossipSub peers
+    _announceSubscription(topic, true);
+
     print('Subscribed to topic: $topic. Subscription created.');
     return subscription;
+  }
+
+  /// Sends a SUB/UNSUB RPC to all connected peers.
+  void _announceSubscription(String topic, bool subscribe) {
+    final subOpt = pb.RPC_SubOpts()
+      ..subscribe = subscribe
+      ..topicid = topic;
+    final rpc = pb.RPC()..subscriptions.add(subOpt);
+
+    final peers = host.network.peers;
+    for (final peerId in peers) {
+      _comms.sendRpc(peerId, rpc, gossipSubIDv11).catchError((e) {
+        print('PubSub: Error announcing subscription to ${peerId.toBase58()}: $e');
+      });
+    }
+  }
+
+  /// Sends all current subscriptions to a specific peer.
+  /// Called when a new GossipSub peer connects.
+  void announceSubscriptionsTo(PeerId peerId) {
+    if (_subscriptions.isEmpty) return;
+    final rpc = pb.RPC();
+    for (final topic in _subscriptions.keys) {
+      rpc.subscriptions.add(pb.RPC_SubOpts()
+        ..subscribe = true
+        ..topicid = topic);
+    }
+    _comms.sendRpc(peerId, rpc, gossipSubIDv11).catchError((e) {
+      print('PubSub: Error sending subscriptions to ${peerId.toBase58()}: $e');
+    });
   }
 
   /// Unsubscribes all listeners from a given topic.

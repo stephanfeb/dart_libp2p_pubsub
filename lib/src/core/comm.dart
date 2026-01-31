@@ -1,13 +1,13 @@
 import 'dart:async';
 import 'dart:typed_data';
 
-// Corrected imports based on PeerId's location and typical libp2p structure
 import 'package:dart_libp2p/core/peer/peer_id.dart';
 import 'package:dart_libp2p/core/host/host.dart';
-import 'package:dart_libp2p/core/network/stream.dart'; // Using P2PStream directly
-import 'package:dart_libp2p/core/network/context.dart' as p2p_context; // For Host.newStream context
+import 'package:dart_libp2p/core/network/stream.dart';
+import 'package:dart_libp2p/core/network/context.dart' as p2p_context;
 import 'package:dart_libp2p/p2p/transport/multiplexing/yamux/yamux_exceptions.dart';
 import 'package:dart_libp2p/p2p/protocol/identify/identify_exceptions.dart';
+import 'package:dart_libp2p/utils/varint.dart';
 
 import '../pb/rpc.pb.dart' as pb;
 
@@ -53,6 +53,7 @@ class _PersistentStream {
 class PubSubProtocol {
   final Host _host;
   final Future<void> Function(PeerId peerId, pb.RPC rpc) _onRpcReceived;
+  void Function(PeerId peerId)? onNewInboundPeer;
 
   /// Map of persistent outbound streams per peer
   final Map<PeerId, _PersistentStream> _outboundStreams = {};
@@ -73,37 +74,78 @@ class PubSubProtocol {
     print('PubSubProtocol initialized with persistent streams for $gossipSubIDv11.');
   }
 
-  /// Internal handler for new streams, adapting to the Host's setStreamHandler signature.
+  /// Internal handler for new inbound streams.
+  /// Reads multiple varint-length-prefixed RPC messages on a persistent stream.
   Future<void> _handleNewStreamData(P2PStream stream, PeerId remotePeer) async {
     print('Received incoming PubSub stream ${stream.id()} from $remotePeer on protocol ${stream.protocol()}');
+    // Notify about new peer so we can send our subscriptions
+    onNewInboundPeer?.call(remotePeer);
+    final carryOver = <int>[];
     try {
-      // Read all data from the stream.
-      // P2PStream.read() should give us the data, assuming it handles length-prefixing
-      // or that PubSub messages are sent as a single chunk per RPC.
-      // This might need refinement if messages are large or chunked.
-      final Uint8List bytes = await stream.read();
-
-      if (bytes.isEmpty) {
-        print('Incoming PubSub stream from $remotePeer closed with no data.');
-        // Stream should be closed by the remote or by us in finally if not already.
-        return;
+      while (!stream.isClosed && !_isClosing) {
+        final bytes = await _readVarintPrefixed(stream, carryOver);
+        if (bytes == null) break; // Stream closed cleanly
+        final rpc = pb.RPC.fromBuffer(bytes);
+        await _onRpcReceived(remotePeer, rpc);
       }
-
-      // Decode the RPC message
-      final rpc = pb.RPC.fromBuffer(bytes);
-      print('Decoded RPC from $remotePeer: ${rpc.toShortString()}');
-
-      // Pass to the callback for processing
-      await _onRpcReceived(remotePeer, rpc);
     } catch (e, s) {
-      print('Error handling incoming PubSub stream from $remotePeer: $e');
-      print(s);
-      await stream.reset(); // Reset stream on error
+      if (!_isClosing) {
+        print('Error on inbound PubSub stream from $remotePeer: $e');
+      }
     } finally {
       if (!stream.isClosed) {
-        await stream.close(); // Ensure stream is closed
+        await stream.close();
       }
     }
+  }
+
+  /// Reads a single varint-length-prefixed message from the stream.
+  /// Returns null if the stream is closed before any data is read.
+  Future<Uint8List?> _readVarintPrefixed(P2PStream stream, List<int> carryOver) async {
+    // Read varint length prefix
+    final varintBytes = BytesBuilder(copy: false);
+    while (true) {
+      int byte;
+      if (carryOver.isNotEmpty) {
+        byte = carryOver.removeAt(0);
+      } else {
+        final chunk = await stream.read(12);
+        if (chunk.isEmpty) return null; // Stream closed
+        carryOver.addAll(chunk);
+        byte = carryOver.removeAt(0);
+      }
+      varintBytes.addByte(byte);
+      if ((byte & 0x80) == 0) break; // End of varint
+      if (varintBytes.length > 10) {
+        throw FormatException('Varint too long');
+      }
+    }
+
+    final msgLen = decodeVarint(varintBytes.toBytes());
+    if (msgLen == 0) return Uint8List(0);
+
+    // Read message bytes
+    final result = BytesBuilder(copy: false);
+    // Use carry-over first
+    if (carryOver.isNotEmpty) {
+      final take = carryOver.length > msgLen ? msgLen : carryOver.length;
+      result.add(carryOver.sublist(0, take));
+      final remaining = carryOver.sublist(take);
+      carryOver.clear();
+      carryOver.addAll(remaining);
+    }
+    while (result.length < msgLen) {
+      final chunk = await stream.read(msgLen - result.length);
+      if (chunk.isEmpty) throw StateError('Stream closed mid-message');
+      result.add(chunk);
+    }
+    // Handle over-read
+    final built = result.toBytes();
+    if (built.length > msgLen) {
+      carryOver.addAll(built.sublist(msgLen));
+      return Uint8List.sublistView(built, 0, msgLen);
+    }
+    return built;
   }
 
   /// Gets or creates a persistent stream for the given peer.
@@ -200,11 +242,13 @@ class PubSubProtocol {
           throw StateError('Stream to $peerId not writable after retry');
         }
 
-        // Encode the RPC message
-        final bytes = rpc.writeToBuffer();
-
-        // Write to the persistent stream (do NOT close it)
-        await persistentStream.stream.write(bytes);
+        // Encode with varint length prefix (matches go-libp2p-pubsub msgio framing)
+        final msgBytes = rpc.writeToBuffer();
+        final lengthPrefix = encodeVarint(msgBytes.length);
+        final framed = BytesBuilder(copy: false);
+        framed.add(lengthPrefix);
+        framed.add(msgBytes);
+        await persistentStream.stream.write(framed.toBytes());
 
         print('RPC sent to $peerId on persistent stream successfully.');
         return; // Success
