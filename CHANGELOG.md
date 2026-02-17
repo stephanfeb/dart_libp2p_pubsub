@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.1.0 - 2026-02-17
+
+### Added
+- Go-libp2p GossipSub interop compatibility
+- Strict signature validation with key-PeerId consistency check
+- IdentifyTimeoutException handling to prevent crashes
+- Stream re-use for RPC message sending
+- Connection protection for critical peers
+
+### Fixed
+- Test failures in gossipsub and validation tests
+- Network errors crashing host app
+
+### Changed
+- Updated `dart_libp2p` dependency to `^1.0.0`
+- Updated `dart_libp2p_kad_dht` dependency to `^1.2.0`
+- Updated `dart_udx` dependency to `^2.0.1`
+
 ## 1.0.1
 
 ### Features
