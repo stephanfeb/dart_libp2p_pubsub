@@ -195,11 +195,15 @@ class MockP2PStream implements P2PStream<Uint8List> {
   // Removed duplicate final PeerId _remotePeer;
   // Removed duplicate String _protocolValue;
   final StreamController<Uint8List> _readController;
-  final StreamSink<Uint8List> _writeSink; // Changed type to StreamSink
-  bool _selfClosed = false; // Indicates if close() was called on this MockP2PStream instance
-  DateTime _openedAt = DateTime.now();
+  late final StreamIterator<Uint8List> _readIterator;
+  final StreamSink<Uint8List> _writeSink;
+  bool _selfClosed = false;
+  final DateTime _openedAt = DateTime.now();
 
-  MockP2PStream(this._remotePeer, this._protocolValue, this._readController, StreamSink<Uint8List> writeSink) : _writeSink = writeSink;
+  MockP2PStream(this._remotePeer, this._protocolValue, this._readController, StreamSink<Uint8List> writeSink)
+      : _writeSink = writeSink {
+    _readIterator = StreamIterator(_readController.stream);
+  }
 
   @override
   String id() => '${_remotePeer.toBase58()}-${_protocolValue}-${_openedAt.microsecondsSinceEpoch}';
@@ -226,10 +230,10 @@ class MockP2PStream implements P2PStream<Uint8List> {
   
   @override
   Future<Uint8List> read([int? maxLength]) async {
-    if (_readController.isClosed) {
-      throw StateError('Stream is closed for reading');
-    }
-    return await _readController.stream.first;
+    if (_selfClosed) return Uint8List(0);
+    final hasNext = await _readIterator.moveNext();
+    if (!hasNext) return Uint8List(0); // Stream closed
+    return _readIterator.current;
   }
 
   @override
@@ -321,8 +325,7 @@ class MockP2PStream implements P2PStream<Uint8List> {
   PeerId get remotePeer => _remotePeer;
 
   @override
-  // TODO: implement isWritable
-  bool get isWritable => throw UnimplementedError();
+  bool get isWritable => !_selfClosed;
 }
 
 class MockNetwork implements Network, Dialer {

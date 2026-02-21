@@ -47,9 +47,6 @@ void main() {
       // signing scheme or verification process expects it.
       // The current signMessage in sign.dart does not set message.key.
       // Let's assume for strict signing, the key should be present.
-      pbMsg.key = keyPair.publicKey.raw; // Trying toRawBytes()
-
-
       final pubsubMsg = PubSubMessage(rpcMessage: pbMsg);
 
       // Use the signMessage function from lib/src/core/sign.dart
@@ -58,7 +55,8 @@ void main() {
       expect(pubsubMsg.rpcMessage.signature, isNotNull);
       expect(pubsubMsg.rpcMessage.signature, isNotEmpty);
       expect(pubsubMsg.rpcMessage.key, isNotNull); // Check if key is set as expected
-      expect(pubsubMsg.rpcMessage.key, equals(keyPair.publicKey.raw)); // Trying toRawBytes()
+      // signMessage sets key to protobuf-marshaled public key, not raw bytes
+      expect(pubsubMsg.rpcMessage.key, equals(keyPair.publicKey.marshal()));
     });
 
     test('should verify a correctly signed message', () async {

@@ -64,7 +64,7 @@ class RandomSubRouter implements Router {
   }
 
   @override
-  Future<void> handleRpc(PeerId peerId, pb.RPC rpc) async {
+  Future<Set<String>> handleRpc(PeerId peerId, pb.RPC rpc) async {
     print('RandomSubRouter: Handling RPC from ${peerId.toBase58()}');
     // RandomSub, like FloodSub, primarily processes published messages.
     // It doesn't have complex control messages.
@@ -82,6 +82,9 @@ class RandomSubRouter implements Router {
         _forwardMessage(msgProto, peerId);
       }
     }
+    // RandomSub delivers messages directly above, so return empty set
+    // to prevent PubSub from double-delivering.
+    return {};
   }
 
   void _forwardMessage(pb.Message msgProto, PeerId originalSender) {

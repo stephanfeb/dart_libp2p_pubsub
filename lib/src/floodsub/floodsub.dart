@@ -67,7 +67,7 @@ class FloodSubRouter implements Router {
   }
 
   @override
-  Future<void> handleRpc(PeerId peerId, pb.RPC rpc) async {
+  Future<Set<String>> handleRpc(PeerId peerId, pb.RPC rpc) async {
     print('FloodSubRouter: Handling RPC from ${peerId.toBase58()}');
     
     // FloodSub primarily processes published messages.
@@ -103,7 +103,7 @@ class FloodSubRouter implements Router {
         final rpcToSend = pb.RPC()..publish.add(msgProto);
         for (final otherPeerId in _peers) {
           if (otherPeerId == peerId) continue; // Don't send back to sender
-          
+
           // TODO: Check if otherPeerId is interested in the topic (if FloodSub variant supports it).
           // For basic flood, send to all.
           try {
@@ -114,6 +114,9 @@ class FloodSubRouter implements Router {
         }
       }
     }
+    // FloodSub delivers messages directly above, so return empty set
+    // to prevent PubSub from double-delivering.
+    return {};
   }
 
   @override

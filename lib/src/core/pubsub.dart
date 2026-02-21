@@ -81,28 +81,16 @@ class PubSub {
   Future<void> _handleRpc(PeerId peerId, pb.RPC rpc) async {
     // Let the router process the RPC first.
     // The router is responsible for validation, mcache, forwarding, and handling control messages.
-    await router.handleRpc(peerId, rpc);
+    // It returns the set of message IDs that were accepted (not duplicates or rejected).
+    final acceptedIds = await router.handleRpc(peerId, rpc);
 
-    // After router processing, if the RPC contained publish messages that the
-    // router deemed valid (implicitly, by not rejecting them and potentially putting them in mcache),
-    // then PubSub should deliver them to its local subscribers.
-    if (rpc.publish.isNotEmpty) {
+    // Only deliver messages that the router actually accepted.
+    if (rpc.publish.isNotEmpty && acceptedIds.isNotEmpty) {
       for (final msgProto in rpc.publish) {
-        // The router should have validated the message.
-        // We construct a PubSubMessage for local delivery.
+        final msgIdStr = messageIdFn(msgProto);
+        if (!acceptedIds.contains(msgIdStr)) continue;
+
         final pubSubMessage = PubSubMessage(rpcMessage: msgProto, receivedFrom: peerId);
-
-        // We need to ensure this message was indeed accepted by the router.
-        // A robust way would be for router.handleRpc to return information about accepted messages.
-        // Lacking that, a common pattern is to check if the message is now in the router's cache,
-        // but the cache (_mcache) is private to GossipSubRouter.
-        // Another heuristic: if the message is for a topic we are subscribed to.
-        // The router's handleRpc for GossipSub already traces DELIVER_MESSAGE if it accepts it.
-        // PubSub's role here is purely local delivery to its subscribers.
-
-        // Let's assume that if router.handleRpc completed without error for this message,
-        // and it's a publish message, it's intended for potential local delivery
-        // if there are subscribers.
         deliverReceivedMessage(pubSubMessage);
       }
     }

@@ -36,7 +36,9 @@ abstract class Router {
   ///
   /// [peerId] is the sender of the RPC.
   /// [rpc] is the decoded RPC message.
-  Future<void> handleRpc(PeerId peerId, pb.RPC rpc);
+  /// Returns the set of message ID strings that were accepted (not duplicates
+  /// or rejected). PubSub uses this to deliver only accepted messages locally.
+  Future<Set<String>> handleRpc(PeerId peerId, pb.RPC rpc);
 
   /// Publishes a message to the network.
   ///

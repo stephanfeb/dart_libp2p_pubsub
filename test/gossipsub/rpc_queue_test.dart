@@ -103,7 +103,9 @@ class MockPeerId implements PeerId {
 
 // Mock PubSubProtocol
 class MockPubSubProtocol implements PubSubProtocol {
-  // final Completer<void> _sendRpcCompleter = Completer<void>(); // Replaced with per-call or onSendRpc logic
+  @override
+  void Function(PeerId peerId)? onNewInboundPeer;
+
   PeerId? lastPeerId;
   pb.RPC? lastRpc;
   String? lastProtocolId;

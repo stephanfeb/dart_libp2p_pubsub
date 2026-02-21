@@ -152,7 +152,8 @@ class GossipSubRouter implements Router {
   }
 
   @override
-  Future<void> handleRpc(PeerId peerId, pb.RPC rpc) async {
+  Future<Set<String>> handleRpc(PeerId peerId, pb.RPC rpc) async {
+    final Set<String> acceptedMessageIds = {};
     print('GossipSubRouter: Handling RPC from ${peerId.toBase58()} for ${rpc.toShortString()}');
     final recvRpcTrace = trace_pb.TraceEvent_RecvRPC()
       ..receivedFrom = peerId.toBytes();
@@ -179,7 +180,7 @@ class GossipSubRouter implements Router {
             // Optionally trace an error or internal issue
             continue;
         }
-        
+
         if (validationResult == ValidationResult.reject || validationResult == ValidationResult.ignore) {
           print('GossipSubRouter: Message $msgIdStr from $peerId failed validation ($validationResult). Dropping.');
           final rejectMsgTrace = trace_pb.TraceEvent_RejectMessage()
@@ -210,6 +211,7 @@ class GossipSubRouter implements Router {
           );
           continue;
         }
+        acceptedMessageIds.add(msgIdStr);
         print('GossipSubRouter: Received new message $msgIdStr from $peerId to process/forward.');
         _mcache.put(msgProto);
 
@@ -408,6 +410,7 @@ class GossipSubRouter implements Router {
         print('GossipSubRouter: Received IDONTWANT from $peerId.');
       }
     }
+    return acceptedMessageIds;
   }
 
   @override
@@ -434,8 +437,24 @@ class GossipSubRouter implements Router {
       fanoutLastPublished[topicId] = DateTime.now();
     }
     
+    // GossipSub v1.1 spec: for publish-only topics (not in mesh), build fanout
+    // from peers known to be subscribed to this topic via _peerTopics.
     if (peersToPublish.isEmpty) {
-      print('GossipSubRouter: No peers in mesh or fanout for topic $topicId to publish to.');
+      final newFanout = <PeerId>{};
+      for (final entry in _peerTopics.entries) {
+        if (entry.value.contains(topicId)) {
+          newFanout.add(entry.key);
+          if (newFanout.length >= params.D) break;
+        }
+      }
+      if (newFanout.isNotEmpty) {
+        fanout[topicId] = newFanout;
+        fanoutLastPublished[topicId] = DateTime.now();
+        peersToPublish.addAll(newFanout);
+        print('GossipSubRouter: Built fanout for publish-only topic $topicId with ${newFanout.length} peers from _peerTopics.');
+      } else {
+        print('GossipSubRouter: No peers in mesh, fanout, or _peerTopics for topic $topicId to publish to.');
+      }
     }
 
     for (final peerId in peersToPublish) {

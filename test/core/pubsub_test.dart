@@ -2,6 +2,7 @@ import 'package:dart_libp2p/core/connmgr/conn_manager.dart';
 import 'package:dart_libp2p/core/multiaddr.dart';
 import 'package:dart_libp2p/core/network/conn.dart';
 import 'package:dart_libp2p/core/network/network.dart';
+import 'package:dart_libp2p/core/network/notifiee.dart';
 import 'package:dart_libp2p/core/network/rcmgr.dart';
 import 'package:dart_libp2p/core/peerstore.dart';
 import 'package:dart_libp2p/core/protocol/switch.dart';
@@ -35,6 +36,66 @@ import '../../lib/src/gossipsub/gossipsub.dart';
 
 
 // --- Mock Implementations ---
+
+// Minimal Network mock that returns no connected peers
+class MockNetwork implements Network {
+  @override
+  List<PeerId> get peers => [];
+
+  @override
+  List<Conn> get conns => [];
+
+  @override
+  List<Conn> connsToPeer(PeerId peerId) => [];
+
+  @override
+  Connectedness connectedness(PeerId peerId) => Connectedness.notConnected;
+
+  @override
+  Future<void> close() async {}
+
+  @override
+  void setStreamHandler(String protocol, Future<void> Function(dynamic stream, PeerId remotePeer) handler) {}
+
+  @override
+  Future<P2PStream> newStream(core_network_context.Context context, PeerId peerId) => throw UnimplementedError();
+
+  @override
+  Future<void> listen(List<MultiAddr> addrs) async {}
+
+  @override
+  List<MultiAddr> get listenAddresses => [];
+
+  @override
+  Future<List<MultiAddr>> get interfaceListenAddresses async => [];
+
+  @override
+  ResourceManager get resourceManager => throw UnimplementedError();
+
+  @override
+  Peerstore get peerstore => throw UnimplementedError();
+
+  @override
+  PeerId get localPeer => throw UnimplementedError();
+
+  @override
+  Future<Conn> dialPeer(core_network_context.Context context, PeerId peerId) => throw UnimplementedError();
+
+  @override
+  Future<void> closePeer(PeerId peerId) async {}
+
+  @override
+  void notify(Notifiee notifiee) {}
+
+  @override
+  void stopNotify(Notifiee notifiee) {}
+
+  @override
+  bool canDial(PeerId peerId, MultiAddr addr) => false;
+
+  @override
+  void removeListenAddress(MultiAddr addr) {}
+}
 
 // Minimal P2PStream mock
 class MockP2PStream implements P2PStream {
@@ -217,8 +278,7 @@ class MockHost implements Host {
   ProtocolSwitch get mux => throw UnimplementedError();
 
   @override
-  // TODO: implement network
-  Network get network => throw UnimplementedError();
+  Network get network => MockNetwork();
 
   @override
   // TODO: implement peerStore
@@ -249,7 +309,7 @@ class MockRouter implements Router {
   @override
   Future<void> removePeer(PeerId peerId) async {}
   @override
-  Future<void> handleRpc(PeerId peerId, dynamic rpc) async {} // Typed rpc
+  Future<Set<String>> handleRpc(PeerId peerId, dynamic rpc) async => {}; // Typed rpc
   
   @override
   Future<void> publish(PubSubMessage message) async { // Typed message

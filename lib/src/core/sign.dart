@@ -65,38 +65,19 @@ Future<bool> verifyMessageSignature(PubSubMessage pubsubMessage) async {
     return false;
   }
 
-  // 1. Get the sender's public key.
-  //    This is typically derived from `rpcMessage.from` (PeerId bytes).
-  //    The `pubsubMessage.from` (PeerId object) can be used.
+  if (rpcMessage.key.isEmpty) {
+    // STRICT SIGNING: Reject messages without embedded public key
+    print('Verification: Message has no public key. Rejecting (strict mode).');
+    return false;
+  }
+
+  // 1. Get the sender's public key from the message's key field.
   final senderPeerId = pubsubMessage.from;
   PublicKey? publicKey;
   try {
-    // How PeerId.extractPublicKey() or similar works depends on dart_libp2p.
-    // It might be: publicKey = senderPeerId.publicKey; (if PeerId embeds it)
-    // Or it might need to be fetched from a PeerStore or derived if the PeerId
-    // implies the key type (e.g., Ed25519 PeerIds).
-    // The `rpcMessage.key` field could also contain the public key.
-
-    // Placeholder: This is a critical step depending on dart_libp2p crypto API.
-    // For now, we assume we can get a PublicKey object from senderPeerId.
-    // If rpcMessage.key is populated, that should be preferred.
-    if (rpcMessage.key.isNotEmpty) {
-      // Unmarshal protobuf-wrapped public key (matches go-libp2p format)
-      final pbKey = crypto_pb.PublicKey.fromBuffer(rpcMessage.key);
-      publicKey = publicKeyFromProto(pbKey);
-    } else {
-      // Try to extract public key from PeerId (works for identity multihash PeerIds)
-      try {
-        publicKey = await senderPeerId.extractPublicKey();
-        if (publicKey == null) {
-          print('Verification: Cannot extract public key from PeerId ${senderPeerId.toBase58()}');
-          return false;
-        }
-      } catch (_) {
-        print('Verification: Cannot extract public key from PeerId ${senderPeerId.toBase58()}');
-        return false;
-      }
-    }
+    // Unmarshal protobuf-wrapped public key (matches go-libp2p format)
+    final pbKey = crypto_pb.PublicKey.fromBuffer(rpcMessage.key);
+    publicKey = publicKeyFromProto(pbKey);
   } catch (e) {
     print('Verification: Error obtaining public key for ${senderPeerId.toBase58()}: $e');
     return false;
