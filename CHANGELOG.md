@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.2.0 - 2026-02-21
+
+### Changed
+- Router `handleRpc` now returns accepted message IDs (`Set<String>`) so PubSub only delivers messages the router actually accepted, preventing double-delivery
+- Signature verification strictly requires an embedded public key (reject messages without one)
+
+### Fixed
+- FloodSub and RandomSub double-delivery of messages to local subscribers
+- GossipSub publish to topics without mesh peers now builds fanout from known subscribed peers
+- Test mocks updated to match new Router interface and Network requirements
+
 ## 1.1.0 - 2026-02-17
 
 ### Added
