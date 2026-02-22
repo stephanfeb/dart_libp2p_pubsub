@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.2.1 - 2026-02-22
+
+### Fixed
+- Go interop: Extract public key from PeerId when key field is absent (Ed25519 inline keys)
+- `verifyMessageSignature()` now falls back to peer ID key extraction instead of rejecting, matching go-libp2p-pubsub behavior
+
 ## 1.2.0 - 2026-02-21
 
 ### Changed

@@ -190,22 +190,22 @@ void main() {
       expect(isValid, isFalse, reason: "Strict mode should reject messages without signatures");
     });
 
-    test('should fail verification for message without public key', () async {
+    test('should verify message without key field when key extractable from PeerId (Go interop)', () async {
       final pbMsg = createTestPbMessage(
         from: peerId,
         topic: 'test-topic',
         data: Uint8List.fromList([1, 2, 3]),
         seqno: Uint8List.fromList([1]),
       );
-      // Sign the message
+      // Sign the message (this sets both signature and key)
       await signMessage(pbMsg, keyPair.privateKey);
-      // But don't set the key field
+      // Clear the key field — Go does this for Ed25519 inline keys
       pbMsg.key = Uint8List(0);
 
       final pubsubMsg = PubSubMessage(rpcMessage: pbMsg, receivedFrom: peerId);
       final isValid = await verifyMessageSignature(pubsubMsg);
 
-      expect(isValid, isFalse, reason: "Verification should fail without public key in message");
+      expect(isValid, isTrue, reason: "Ed25519 key should be extractable from PeerId");
     });
   });
 }

@@ -65,22 +65,27 @@ Future<bool> verifyMessageSignature(PubSubMessage pubsubMessage) async {
     return false;
   }
 
-  if (rpcMessage.key.isEmpty) {
-    // STRICT SIGNING: Reject messages without embedded public key
-    print('Verification: Message has no public key. Rejecting (strict mode).');
-    return false;
-  }
-
-  // 1. Get the sender's public key from the message's key field.
+  // 1. Get the sender's public key from the message's key field,
+  //    or extract it from the peer ID (Go omits the key field for Ed25519
+  //    inline keys where the key is recoverable from the peer ID).
   final senderPeerId = pubsubMessage.from;
   PublicKey? publicKey;
-  try {
-    // Unmarshal protobuf-wrapped public key (matches go-libp2p format)
-    final pbKey = crypto_pb.PublicKey.fromBuffer(rpcMessage.key);
-    publicKey = publicKeyFromProto(pbKey);
-  } catch (e) {
-    print('Verification: Error obtaining public key for ${senderPeerId.toBase58()}: $e');
-    return false;
+  if (rpcMessage.key.isNotEmpty) {
+    try {
+      // Unmarshal protobuf-wrapped public key (matches go-libp2p format)
+      final pbKey = crypto_pb.PublicKey.fromBuffer(rpcMessage.key);
+      publicKey = publicKeyFromProto(pbKey);
+    } catch (e) {
+      print('Verification: Error obtaining public key for ${senderPeerId.toBase58()}: $e');
+      return false;
+    }
+  } else {
+    // Key not in message — extract from sender's PeerId (Ed25519 inline keys)
+    publicKey = await senderPeerId.extractPublicKey();
+    if (publicKey == null) {
+      print('Verification: Message has no public key and cannot extract from PeerId. Rejecting.');
+      return false;
+    }
   }
 
   // 2. Construct the payload that was signed.

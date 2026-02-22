@@ -208,13 +208,14 @@ void main() {
       expect(await validateMessageSignature(message), equals(ValidationResult.reject));
     });
 
-    test('should reject message without public key', () async {
+    test('should accept message without key field when key extractable from Ed25519 PeerId (Go interop)', () async {
       final message = await createSignedMessage(
         signerKeyPair: keyPair,
         from: signedPeerId,
         includeKey: false,
       );
-      expect(await validateMessageSignature(message), equals(ValidationResult.reject));
+      // Ed25519 keys are inline in the peer ID, so extraction should succeed
+      expect(await validateMessageSignature(message), equals(ValidationResult.accept));
     });
 
     test('should reject message with key-PeerId mismatch', () async {

@@ -1,6 +1,6 @@
 name: dart_libp2p_pubsub
 description: A comprehensive libp2p pubsub implementation for Dart, featuring GossipSub v1.1, FloodSub, and RandomSub protocols with message validation, peer scoring, and tracing support.
-version: 1.2.0
+version: 1.2.1
 repository: https://github.com/stephanfeb/dart_libp2p_pubsub
 homepage: https://github.com/stephanfeb/dart_libp2p_pubsub
 documentation: https://github.com/stephanfeb/dart_libp2p_pubsub/tree/main/docs
