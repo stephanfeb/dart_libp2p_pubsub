@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.3.0 - 2026-09-23
+
+### Changed
+- **Dependency constraints widened so this package works with dart_libp2p 2.x**: `dart_libp2p` is now `>=1.0.0 <3.0.0`, `dart_libp2p_kad_dht` is `>=1.3.0 <2.0.0` and `dart_udx` is `>=2.0.1 <4.0.0`. dart_libp2p 2.0.0 changes no API used here; it requires dart_udx 3.0.0, whose wire protocol v3 does not interoperate with v2. The previous pins made this package unresolvable alongside dart_libp2p 2.x, so a consumer could not upgrade either.
+
 ## 1.2.1 - 2026-02-22
 
 ### Fixed
