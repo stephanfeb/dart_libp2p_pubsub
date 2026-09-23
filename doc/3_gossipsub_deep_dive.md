@@ -17,7 +17,7 @@ The following diagram illustrates this concept:
 
 ```mermaid
 graph TD
-    subgraph Topic: "news-alerts"
+    subgraph topic ["Topic: news-alerts"]
         A((Node A))
         B((Node B))
         C((Node C))
@@ -25,21 +25,18 @@ graph TD
         E((Node E))
         F((Node F))
 
-        subgraph Mesh (Full Messages)
+        subgraph mesh ["Mesh (full messages)"]
             A --- B
             B --- C
             C --- A
         end
 
-        subgraph Gossip (Metadata Only)
+        subgraph gossip ["Gossip (metadata only)"]
             A -.-> D
             B -.-> E
             C -.-> F
         end
     end
-
-    style Mesh fill:#f9f,stroke:#333,stroke-width:2px
-    style Gossip fill:#ccf,stroke:#333,stroke-width:2px
 ```
 
 ### The Mesh (`mesh` map)
