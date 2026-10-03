@@ -10,3 +10,6 @@ pubspec.lock
 .idea
 
 *.iml
+
+# Local development only: point dependencies at sibling checkouts.
+pubspec_overrides.yaml

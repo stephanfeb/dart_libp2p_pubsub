@@ -36,7 +36,7 @@ Add to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  dart_libp2p_pubsub: ^1.0.1
+  dart_libp2p_pubsub: ^1.4.0
   dart_libp2p: ^0.5.2
 ```
 
@@ -163,6 +163,26 @@ dart test
 # Generate protobuf files
 dart run build_runner build
 ```
+
+A fresh clone builds against the published packages. To develop against local
+checkouts of [dart_libp2p](https://github.com/stephanfeb/dart_libp2p),
+[dart_libp2p_kad_dht](https://github.com/stephanfeb/dart_libp2p_kad_dht) or
+[dart-udx](https://github.com/stephanfeb/dart-udx), create a
+`pubspec_overrides.yaml` (git-ignored) next to `pubspec.yaml`:
+
+```yaml
+dependency_overrides:
+  dart_libp2p:
+    path: ../dart-libp2p
+  dart_libp2p_kad_dht:
+    path: ../dart-libp2p-kad-dht
+  dart_udx:
+    path: ../dart-udx
+```
+
+The Go interop test in `test/interop` builds the go-libp2p peer from a
+dart_libp2p checkout (`GO_PEER_DIR`, or `../dart-libp2p/interop/go-peer` by
+default) and needs Go.
 
 ## License
 
