@@ -51,6 +51,8 @@ final host = await createLibp2pHost();
 
 // Set up GossipSub router
 final router = GossipSubRouter();
+// Published messages are signed with the host's own private key; no key
+// needs to be passed.
 final pubsub = PubSub(host, router);
 
 // Start the pubsub system

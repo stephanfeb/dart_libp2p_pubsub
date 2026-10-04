@@ -54,6 +54,12 @@ class PubSub {
 
   PubSubProtocol get comms => _comms;
 
+  /// Creates a PubSub service on [host] that routes messages with [router].
+  ///
+  /// Published messages are signed with [privateKey], or with the host's own
+  /// private key from its peerstore when [privateKey] is omitted. A message's
+  /// `from` is always the host's peer ID, so [privateKey] must be the host's
+  /// key; peers reject a signature from any other key.
   // TODO: Consider making PubSub an async initializable class if attach needs to be awaited.
   PubSub(this.host, this.router, {PrivateKey? privateKey, EventTracer? tracer, PeerScoreParams? scoreParams}) :
     _privateKey = privateKey,
@@ -244,10 +250,16 @@ class PubSub {
       ..seqno = seqno
       ..topic = topic;
 
-    // Sign the message if privateKey is available
-    if (_privateKey != null) {
-      await signMessage(pbMsg, _privateKey!);
+    // Validation requires a signature (strict signing), so sign every message.
+    // Without an explicit privateKey, use the host's own key from its
+    // peerstore, as go-libp2p-pubsub does.
+    final signingKey = _privateKey ?? await host.peerStore.keyBook.privKey(host.id);
+    if (signingKey == null) {
+      throw StateError(
+          'PubSub: cannot sign messages: no privateKey was given and the '
+          'peerstore holds no private key for ${host.id.toBase58()}');
     }
+    await signMessage(pbMsg, signingKey);
 
     final pubSubMessage = PubSubMessage(
       rpcMessage: pbMsg,
