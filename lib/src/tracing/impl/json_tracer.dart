@@ -3,6 +3,9 @@ import 'dart:io'; // For IOSink
 
 import '../../pb/trace.pb.dart' as pb; // For pb.TraceEvent
 import '../tracer.dart'; // For EventTracer interface
+import 'package:logging/logging.dart';
+
+final _log = Logger('JsonEventTracer');
 
 /// An [EventTracer] implementation that outputs trace events as JSON strings.
 /// It can write to an [IOSink] (e.g., a file) or to the console if no sink is provided.
@@ -52,7 +55,7 @@ class JsonEventTracer implements EventTracer {
       if (_outputSink != null) {
         _outputSink!.writeln(errorMessage);
       } else {
-        print(errorMessage);
+        _log.warning(errorMessage);
       }
       // Fallback: print the event's toString() representation
       final fallbackMessage = 'JsonEventTracer: Event (toString): ${event.toString()}';
@@ -69,9 +72,9 @@ class JsonEventTracer implements EventTracer {
     // If _outputSink is a file sink created by this instance, it's opened in the constructor.
     // Otherwise, if an external sink is provided, it's assumed to be ready.
     if (_outputSink != null) {
-      print('JsonEventTracer: Started. Outputting to sink.');
+      _log.fine('JsonEventTracer: Started. Outputting to sink.');
     } else {
-      print('JsonEventTracer: Started. Outputting to console.');
+      _log.fine('JsonEventTracer: Started. Outputting to console.');
     }
   }
 
@@ -80,9 +83,9 @@ class JsonEventTracer implements EventTracer {
     // Flush the sink if it exists.
     await _outputSink?.flush();
     if (_outputSink != null) {
-      print('JsonEventTracer: Stopped. Sink flushed.');
+      _log.fine('JsonEventTracer: Stopped. Sink flushed.');
     } else {
-      print('JsonEventTracer: Stopped.');
+      _log.fine('JsonEventTracer: Stopped.');
     }
   }
 
@@ -91,11 +94,11 @@ class JsonEventTracer implements EventTracer {
     await stop(); // Ensure everything is flushed.
     if (_shouldCloseSink && _outputSink != null) {
       await _outputSink!.close();
-      print('JsonEventTracer: Disposed. Owned sink closed.');
+      _log.fine('JsonEventTracer: Disposed. Owned sink closed.');
     } else if (_outputSink != null) {
-      print('JsonEventTracer: Disposed. External sink not closed by this instance.');
+      _log.fine('JsonEventTracer: Disposed. External sink not closed by this instance.');
     } else {
-      print('JsonEventTracer: Disposed.');
+      _log.fine('JsonEventTracer: Disposed.');
     }
   }
 }

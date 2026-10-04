@@ -6,6 +6,9 @@ import 'dart:async';
 import 'package:dart_libp2p/core/discovery.dart'; // For Discovery interface
 import 'package:dart_libp2p/core/peer/addr_info.dart'; // For AddrInfo
 import 'package:dart_libp2p/core/peer/peer_id.dart';   // For PeerId
+import 'package:logging/logging.dart';
+
+final _log = Logger('PubSubDiscovery');
 
 // Callback for when a new peer relevant to PubSub is discovered.
 typedef PubSubPeerDiscoveredCallback = void Function(PeerId peerId, String? context); // Added context
@@ -40,21 +43,21 @@ class PubSubDiscovery {
   Future<void> start() async {
     if (generalServiceTag != null && generalServiceTag!.isNotEmpty) {
       try {
-        print('PubSubDiscovery: Advertising general service tag: $generalServiceTag');
+        _log.fine('PubSubDiscovery: Advertising general service tag: $generalServiceTag');
         // Advertise returns a Future<Duration> (TTL). We might need to re-advertise.
         await _discoveryService.advertise(generalServiceTag!);
         // TODO: Handle re-advertisement based on TTL.
 
-        print('PubSubDiscovery: Finding peers for general service tag: $generalServiceTag');
+        _log.fine('PubSubDiscovery: Finding peers for general service tag: $generalServiceTag');
         final stream = await _discoveryService.findPeers(generalServiceTag!);
         _generalServiceSubscription?.cancel(); // Cancel previous if any
         _generalServiceSubscription = stream.listen(
           (addrInfo) => _handleDiscoveredPeer(addrInfo, generalServiceTag),
-          onError: (e) => print('PubSubDiscovery: Error in general service peer stream: $e'),
-          onDone: () => print('PubSubDiscovery: General service peer stream closed.'),
+          onError: (e) => _log.warning('PubSubDiscovery: Error in general service peer stream: $e'),
+          onDone: () => _log.fine('PubSubDiscovery: General service peer stream closed.'),
         );
       } catch (e, s) {
-        print('PubSubDiscovery: Error during general service start: $e\nStack trace:\n$s');
+        _log.warning('PubSubDiscovery: Error during general service start: $e\nStack trace:\n$s');
       }
     }
   }
@@ -63,11 +66,11 @@ class PubSubDiscovery {
   Future<void> discoverTopic(String topic) async {
     final topicNamespace = "$TOPIC_DISCOVERY_PREFIX$topic";
     try {
-      print('PubSubDiscovery: Advertising topic: $topicNamespace');
+      _log.fine('PubSubDiscovery: Advertising topic: $topicNamespace');
       await _discoveryService.advertise(topicNamespace);
       // TODO: Handle re-advertisement for topic.
 
-      print('PubSubDiscovery: Finding peers for topic: $topicNamespace');
+      _log.fine('PubSubDiscovery: Finding peers for topic: $topicNamespace');
       final stream = await _discoveryService.findPeers(topicNamespace);
       
       // Cancel any existing subscription for this topic before starting a new one.
@@ -75,14 +78,14 @@ class PubSubDiscovery {
       
       _topicPeerSubscriptions[topicNamespace] = stream.listen(
         (addrInfo) => _handleDiscoveredPeer(addrInfo, topicNamespace),
-        onError: (e) => print('PubSubDiscovery: Error in topic peer stream for $topicNamespace: $e'),
+        onError: (e) => _log.warning('PubSubDiscovery: Error in topic peer stream for $topicNamespace: $e'),
         onDone: () {
-          print('PubSubDiscovery: Topic peer stream for $topicNamespace closed.');
+          _log.fine('PubSubDiscovery: Topic peer stream for $topicNamespace closed.');
           _topicPeerSubscriptions.remove(topicNamespace);
         },
       );
     } catch (e, s) {
-      print('PubSubDiscovery: Error during topic discovery for $topicNamespace: $e\nStack trace:\n$s');
+      _log.warning('PubSubDiscovery: Error during topic discovery for $topicNamespace: $e\nStack trace:\n$s');
     }
   }
 
@@ -93,18 +96,18 @@ class PubSubDiscovery {
     final subscription = _topicPeerSubscriptions.remove(topicNamespace);
     if (subscription != null) {
       await subscription.cancel();
-      print('PubSubDiscovery: Stopped discovering peers for topic: $topicNamespace');
+      _log.fine('PubSubDiscovery: Stopped discovering peers for topic: $topicNamespace');
     }
     // TODO: Implement unadvertising if the Discovery service supports it or manage advertisement TTLs.
   }
 
   void _handleDiscoveredPeer(AddrInfo addrInfo, String? discoveryContext) {
-    print('PubSubDiscovery: Discovered peer ${addrInfo.id.toBase58()} (context: $discoveryContext) with addrs: ${addrInfo.addrs}');
+    _log.fine('PubSubDiscovery: Discovered peer ${addrInfo.id.toBase58()} (context: $discoveryContext) with addrs: ${addrInfo.addrs}');
     for (final callback in List<PubSubPeerDiscoveredCallback>.from(_discoveryCallbacks)) {
       try {
         callback(addrInfo.id, discoveryContext);
       } catch (e, s) {
-        print('PubSubDiscovery: Error in discovery callback: $e\nStack trace:\n$s');
+        _log.warning('PubSubDiscovery: Error in discovery callback: $e\nStack trace:\n$s');
       }
     }
   }
@@ -123,7 +126,7 @@ class PubSubDiscovery {
 
   /// Cleans up resources, cancelling all active discovery operations.
   Future<void> dispose() async {
-    print('PubSubDiscovery: Disposing...');
+    _log.fine('PubSubDiscovery: Disposing...');
     await _generalServiceSubscription?.cancel();
     _generalServiceSubscription = null;
 
@@ -133,6 +136,6 @@ class PubSubDiscovery {
     _topicPeerSubscriptions.clear();
     _discoveryCallbacks.clear();
     // TODO: Cancel any re-advertisement timers if implemented.
-    print('PubSubDiscovery: Disposed.');
+    _log.fine('PubSubDiscovery: Disposed.');
   }
 }

@@ -10,6 +10,9 @@ import '../pb/rpc.pb.dart' as pb;
 import '../core/topic.dart';
 import '../core/router.dart';
 import '../core/comm.dart'; // For a potential RandomSub protocol ID
+import 'package:logging/logging.dart';
+
+final _log = Logger('RandomSubRouter');
 
 // TODO: Define a specific protocol ID for RandomSub if it's different from FloodSub/GossipSub.
 // For now, let's assume it might reuse floodSubID or have its own.
@@ -37,7 +40,7 @@ class RandomSubRouter implements Router {
     _pubsub = pubsub;
     // TODO: Register RandomSub protocol ID (if specific) with PubSub's comms layer.
     // e.g., _pubsub!.comms.setProtocolHandler(randomSubID, _handleIncomingRpcWrapper);
-    print('RandomSubRouter attached to PubSub.');
+    _log.fine('RandomSubRouter attached to PubSub.');
   }
 
   @override
@@ -45,34 +48,34 @@ class RandomSubRouter implements Router {
     _pubsub = null;
     _peers.clear();
     _subscribedTopics.clear();
-    print('RandomSubRouter detached.');
+    _log.fine('RandomSubRouter detached.');
   }
 
   @override
   Future<void> addPeer(PeerId peerId, String protocolId) async {
     // TODO: Check if protocolId matches a specific RandomSub ID.
     // For now, assume any peer added might be a candidate.
-    print('RandomSubRouter: Peer added - ${peerId.toBase58()} (protocol: $protocolId)');
+    _log.fine('RandomSubRouter: Peer added - ${peerId.toBase58()} (protocol: $protocolId)');
     _peers.add(peerId);
   }
 
   @override
   Future<void> removePeer(PeerId peerId) async {
     if (_peers.remove(peerId)) {
-      print('RandomSubRouter: Peer removed - ${peerId.toBase58()}');
+      _log.fine('RandomSubRouter: Peer removed - ${peerId.toBase58()}');
     }
   }
 
   @override
   Future<Set<String>> handleRpc(PeerId peerId, pb.RPC rpc) async {
-    print('RandomSubRouter: Handling RPC from ${peerId.toBase58()}');
+    _log.fine('RandomSubRouter: Handling RPC from ${peerId.toBase58()}');
     // RandomSub, like FloodSub, primarily processes published messages.
     // It doesn't have complex control messages.
     if (rpc.publish.isNotEmpty) {
       for (final msgProto in rpc.publish) {
         // TODO: Validate message.
         if (_subscribedTopics.contains(msgProto.topic)) {
-          print('RandomSubRouter: Received message on subscribed topic ${msgProto.topic} from $peerId. Delivering locally.');
+          _log.fine('RandomSubRouter: Received message on subscribed topic ${msgProto.topic} from $peerId. Delivering locally.');
           final pubSubMsg = PubSubMessage(rpcMessage: msgProto, receivedFrom: peerId);
           _pubsub?.deliverReceivedMessage(pubSubMsg);
         }
@@ -98,14 +101,14 @@ class RandomSubRouter implements Router {
     final int count = min(candidates.length, _randomSubDegree);
     final rpcToSend = pb.RPC()..publish.add(msgProto);
 
-    print('RandomSubRouter: Forwarding message on topic ${msgProto.topic} to $count random peers.');
+    _log.fine('RandomSubRouter: Forwarding message on topic ${msgProto.topic} to $count random peers.');
     for (int i = 0; i < count; i++) {
       final peerToSendTo = candidates[i];
       try {
         // TODO: Use the correct protocol ID for RandomSub. Using floodSubID as placeholder.
         _pubsub?.comms.sendRpc(peerToSendTo, rpcToSend, floodSubID); 
       } catch (e) {
-        print('RandomSubRouter: Failed to forward message to peer ${peerToSendTo.toBase58()}: $e');
+        _log.fine('RandomSubRouter: Failed to forward message to peer ${peerToSendTo.toBase58()}: $e');
       }
     }
   }
@@ -113,10 +116,10 @@ class RandomSubRouter implements Router {
   @override
   Future<void> publish(PubSubMessage message) async {
     final topicId = message.topic;
-    print('RandomSubRouter: Publishing message for topic $topicId');
+    _log.fine('RandomSubRouter: Publishing message for topic $topicId');
 
     if (_pubsub == null) {
-      print('RandomSubRouter: PubSub not attached. Cannot publish.');
+      _log.warning('RandomSubRouter: PubSub not attached. Cannot publish.');
       return;
     }
     // TODO: Add to a "seen" cache.
@@ -125,23 +128,23 @@ class RandomSubRouter implements Router {
 
   @override
   Future<void> join(Topic topic) async {
-    print('RandomSubRouter: Joining topic ${topic.name}');
+    _log.fine('RandomSubRouter: Joining topic ${topic.name}');
     _subscribedTopics.add(topic.name);
   }
 
   @override
   Future<void> leave(Topic topic) async {
-    print('RandomSubRouter: Leaving topic ${topic.name}');
+    _log.fine('RandomSubRouter: Leaving topic ${topic.name}');
     _subscribedTopics.remove(topic.name);
   }
 
   @override
   Future<void> start() async {
-    print('RandomSubRouter started.');
+    _log.fine('RandomSubRouter started.');
   }
 
   @override
   Future<void> stop() async {
-    print('RandomSubRouter stopped.');
+    _log.fine('RandomSubRouter stopped.');
   }
 }

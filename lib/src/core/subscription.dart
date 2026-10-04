@@ -1,4 +1,7 @@
 import 'dart:async';
+import 'package:logging/logging.dart';
+
+final _log = Logger('Subscription');
 
 // TODO: Define a proper Message class/interface to be used instead of `dynamic`.
 // import 'message.dart'; // Or from pb/rpc.pb.dart
@@ -49,7 +52,7 @@ class Subscription {
       await _controller.close();
       // Only call the external callback if we are the ones performing the cancellation action.
       await _cancelCallback(); 
-      print('Subscription to topic "$_topic" cancelled.');
+      _log.fine('Subscription to topic "$_topic" cancelled.');
     }
     // If already closed, subsequent calls to cancel will do nothing further
     // with respect to the controller or the callback.

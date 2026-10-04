@@ -1,6 +1,9 @@
 import 'package:dart_libp2p/core/peer/peer_id.dart';
 import 'package:clock/clock.dart';
 import 'score_params.dart'; // Import the actual PeerScoreParams
+import 'package:logging/logging.dart';
+
+final _log = Logger('PeerScore');
 
 /// Holds scoring statistics for a peer within a specific topic.
 class TopicScoreStats {
@@ -310,7 +313,7 @@ class PeerScore {
     // Note: Global `invalidMessageDeliveries` (for P6) is a lifetime counter.
     // `behaviourPenalty` counter decay is handled within P6 calculation.
 
-    print('PeerScore (${peerId.toBase58()}): Refreshed score. Current: $score, LastUpdated: $lastUpdated');
+    _log.fine('PeerScore (${peerId.toBase58()}): Refreshed score. Current: $score, LastUpdated: $lastUpdated');
   }
 
   /// Adds a penalty for misbehavior.

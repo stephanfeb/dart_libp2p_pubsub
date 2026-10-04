@@ -2,6 +2,9 @@ import 'dart:async';
 import 'package:dart_libp2p/core/interfaces.dart';
 import 'package:dart_libp2p/core/peer/peer_id.dart';
 import 'package:dart_libp2p/core/host/host.dart'; // For Host, to potentially access event bus
+import 'package:logging/logging.dart';
+
+final _log = Logger('PeerNotifier');
 // It's likely that the Host's event bus or connection manager will emit specific event types.
 // For example: import 'package:dart_libp2p/core/event/events.dart';
 
@@ -44,7 +47,7 @@ class PeerNotifier {
     });
 
 
-    print('PeerNotifier: TODO: Implement actual subscription to host peer events.');
+    _log.fine('PeerNotifier: TODO: Implement actual subscription to host peer events.');
   }
 
   /// Registers a callback to be invoked when a relevant peer connects.
@@ -60,12 +63,12 @@ class PeerNotifier {
   /// Notifies all registered callbacks about a peer connection.
   /// This would be called internally when a relevant host event is received.
   Future<void> _notifyConnected(PeerId peerId) async {
-    print('PeerNotifier: Peer connected - ${peerId.toBase58()}');
+    _log.fine('PeerNotifier: Peer connected - ${peerId.toBase58()}');
     for (final callback in _connectedCallbacks) {
       try {
         await callback(peerId);
       } catch (e, s) {
-        print('PeerNotifier: Error in onPeerConnected callback for $peerId: $e\n$s');
+        _log.warning('PeerNotifier: Error in onPeerConnected callback for $peerId: $e\n$s');
       }
     }
   }
@@ -73,12 +76,12 @@ class PeerNotifier {
   /// Notifies all registered callbacks about a peer disconnection.
   /// This would be called internally when a relevant host event is received.
   Future<void> _notifyDisconnected(PeerId peerId) async {
-    print('PeerNotifier: Peer disconnected - ${peerId.toBase58()}');
+    _log.fine('PeerNotifier: Peer disconnected - ${peerId.toBase58()}');
     for (final callback in _disconnectedCallbacks) {
       try {
         await callback(peerId);
       } catch (e, s) {
-        print('PeerNotifier: Error in onPeerDisconnected callback for $peerId: $e\n$s');
+        _log.warning('PeerNotifier: Error in onPeerDisconnected callback for $peerId: $e\n$s');
       }
     }
   }
@@ -88,6 +91,6 @@ class PeerNotifier {
     // _hostEventSubscription?.cancel();
     _connectedCallbacks.clear();
     _disconnectedCallbacks.clear();
-    print('PeerNotifier: Disposed.');
+    _log.fine('PeerNotifier: Disposed.');
   }
 }

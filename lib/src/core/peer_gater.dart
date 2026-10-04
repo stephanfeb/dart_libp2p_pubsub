@@ -5,6 +5,9 @@ import 'package:dart_libp2p/core/network/conn.dart'; // For Connection (or Conn)
 import 'package:dart_libp2p/core/multiaddr.dart'; // For MultiAddr type
 
 import 'blacklist.dart'; // To potentially use the Blacklist in a SimplePeerGater
+import 'package:logging/logging.dart';
+
+final _log = Logger('PeerGater');
 
 // DisconnectReason equivalent (could be an enum or const strings)
 // For now, using a simple String. A more structured type might be better.
@@ -55,7 +58,7 @@ class SimplePeerGater implements PeerGater {
   @override
   FutureOr<bool> interceptPeerDial(PeerId peerId) {
     if (blacklist?.contains(peerId) ?? false) {
-      print('SimplePeerGater: Denying dial to blacklisted peer ${peerId.toBase58()}');
+      _log.fine('SimplePeerGater: Denying dial to blacklisted peer ${peerId.toBase58()}');
       return false;
     }
     return true;
@@ -66,7 +69,7 @@ class SimplePeerGater implements PeerGater {
     // Could add address-specific rules here if needed.
     // For now, defers to interceptPeerDial logic.
     if (blacklist?.contains(peerId) ?? false) {
-      print('SimplePeerGater: Denying dial to address $multiaddr for blacklisted peer ${peerId.toBase58()}');
+      _log.fine('SimplePeerGater: Denying dial to address $multiaddr for blacklisted peer ${peerId.toBase58()}');
       return false;
     }
     return true;
@@ -76,7 +79,7 @@ class SimplePeerGater implements PeerGater {
   FutureOr<bool> interceptAccept(Conn connection) {
     final remotePeerId = connection.remotePeer; // Assuming Conn has remotePeer
     if (blacklist?.contains(remotePeerId) ?? false) {
-      print('SimplePeerGater: Denying accept from blacklisted peer ${remotePeerId.toBase58()}');
+      _log.fine('SimplePeerGater: Denying accept from blacklisted peer ${remotePeerId.toBase58()}');
       return false;
     }
     return true;
@@ -85,7 +88,7 @@ class SimplePeerGater implements PeerGater {
   @override
   FutureOr<bool> interceptSecured(PeerId peerId, Conn connection, bool isOutbound) {
     if (blacklist?.contains(peerId) ?? false) {
-      print('SimplePeerGater: Denying secured connection with blacklisted peer ${peerId.toBase58()}');
+      _log.fine('SimplePeerGater: Denying secured connection with blacklisted peer ${peerId.toBase58()}');
       return false;
     }
     return true;
@@ -95,7 +98,7 @@ class SimplePeerGater implements PeerGater {
   (FutureOr<bool> allow, DisconnectReason reason) interceptUpgraded(Conn connection) {
     final remotePeerId = connection.remotePeer; // Assuming Conn has remotePeer
     if (blacklist?.contains(remotePeerId) ?? false) {
-      print('SimplePeerGater: Denying upgraded connection with blacklisted peer ${remotePeerId.toBase58()}');
+      _log.fine('SimplePeerGater: Denying upgraded connection with blacklisted peer ${remotePeerId.toBase58()}');
       return (false, "peer is blacklisted");
     }
     return (true, ReasonNoReason);

@@ -3,6 +3,9 @@ import 'dart:typed_data'; // For Uint8List, ByteData, Endian
 
 import '../../pb/trace.pb.dart' as pb; // For pb.TraceEvent
 import '../tracer.dart'; // For EventTracer interface
+import 'package:logging/logging.dart';
+
+final _log = Logger('PbEventTracer');
 
 /// An [EventTracer] implementation that serializes trace events into their
 /// binary protobuf format.
@@ -72,7 +75,7 @@ class PbEventTracer implements EventTracer {
           _outputSink!.writeln(errorMessage); // Assuming sink can handle strings for errors
         } catch (_) {} // Ignore error during error reporting
       } else {
-        print(errorMessage);
+        _log.warning(errorMessage);
       }
       // Fallback: print the event's toString() representation
       final fallbackMessage = 'PbEventTracer: Event (toString): ${event.toString()}';
@@ -89,9 +92,9 @@ class PbEventTracer implements EventTracer {
   @override
   Future<void> start() async {
     if (_outputSink != null) {
-      print('PbEventTracer: Started. Outputting to sink.');
+      _log.fine('PbEventTracer: Started. Outputting to sink.');
     } else {
-      print('PbEventTracer: Started. Outputting to console (confirmations only).');
+      _log.fine('PbEventTracer: Started. Outputting to console (confirmations only).');
     }
   }
 
@@ -99,9 +102,9 @@ class PbEventTracer implements EventTracer {
   Future<void> stop() async {
     await _outputSink?.flush();
     if (_outputSink != null) {
-      print('PbEventTracer: Stopped. Sink flushed.');
+      _log.fine('PbEventTracer: Stopped. Sink flushed.');
     } else {
-      print('PbEventTracer: Stopped.');
+      _log.fine('PbEventTracer: Stopped.');
     }
   }
 
@@ -110,11 +113,11 @@ class PbEventTracer implements EventTracer {
     await stop(); // Ensure everything is flushed.
     if (_shouldCloseSink && _outputSink != null) {
       await _outputSink!.close();
-      print('PbEventTracer: Disposed. Owned sink closed.');
+      _log.fine('PbEventTracer: Disposed. Owned sink closed.');
     } else if (_outputSink != null) {
-      print('PbEventTracer: Disposed. External sink not closed by this instance.');
+      _log.fine('PbEventTracer: Disposed. External sink not closed by this instance.');
     } else {
-      print('PbEventTracer: Disposed.');
+      _log.fine('PbEventTracer: Disposed.');
     }
   }
 }

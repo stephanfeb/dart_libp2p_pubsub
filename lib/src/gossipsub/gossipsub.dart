@@ -15,6 +15,9 @@ import 'mcache.dart'; // For MessageCache
 import '../pb/trace.pb.dart' as trace_pb; // For trace event types
 import '../util/midgen.dart'; // For defaultMessageIdFn
 import '../core/validation.dart'; // For ValidationResult
+import 'package:logging/logging.dart';
+
+final _log = Logger('GossipSubRouter');
 
 // Placeholder for GossipSub parameters
 // TODO: Define this class properly with all GossipSub configurable values.
@@ -107,19 +110,19 @@ class GossipSubRouter implements Router {
       // This case should ideally not happen if PubSub construction is correct
       throw StateError('GossipSubRouter.attach: PubSub instance is null, cannot initialize RpcOutgoingQueueManager.');
     }
-    print('GossipSubRouter attached to PubSub and RpcQueueManager initialized.');
+    _log.fine('GossipSubRouter attached to PubSub and RpcQueueManager initialized.');
   }
 
   @override
   Future<void> detach() async {
     _rpcQueueManager.clearAll();
     _pubsub = null;
-    print('GossipSubRouter detached.');
+    _log.fine('GossipSubRouter detached.');
   }
 
   @override
   Future<void> addPeer(PeerId peerId, String protocolId) async {
-    print('GossipSubRouter: Peer added - ${peerId.toBase58()} on $protocolId');
+    _log.fine('GossipSubRouter: Peer added - ${peerId.toBase58()} on $protocolId');
     _pubsub?.addPeer(peerId, protocolId); // Notify PubSub core to manage scores
     final addPeerTrace = trace_pb.TraceEvent_AddPeer()
       ..peerID = peerId.toBytes()
@@ -133,7 +136,7 @@ class GossipSubRouter implements Router {
 
   @override
   Future<void> removePeer(PeerId peerId) async {
-    print('GossipSubRouter: Peer removed - ${peerId.toBase58()}');
+    _log.fine('GossipSubRouter: Peer removed - ${peerId.toBase58()}');
     _pubsub?.removePeer(peerId); // Notify PubSub core to manage scores
     final removePeerTrace = trace_pb.TraceEvent_RemovePeer()
       ..peerID = peerId.toBytes();
@@ -148,13 +151,13 @@ class GossipSubRouter implements Router {
     
     // Unprotect peer since it's no longer in any mesh
     _pubsub?.host?.connManager.unprotect(peerId, 'gossipsub-mesh');
-    print('GossipSubRouter: Unprotected removed peer $peerId');
+    _log.fine('GossipSubRouter: Unprotected removed peer $peerId');
   }
 
   @override
   Future<Set<String>> handleRpc(PeerId peerId, pb.RPC rpc) async {
     final Set<String> acceptedMessageIds = {};
-    print('GossipSubRouter: Handling RPC from ${peerId.toBase58()} for ${rpc.toShortString()}');
+    _log.fine('GossipSubRouter: Handling RPC from ${peerId.toBase58()} for ${rpc.toShortString()}');
     final recvRpcTrace = trace_pb.TraceEvent_RecvRPC()
       ..receivedFrom = peerId.toBytes();
       // ..meta = ... ; // TODO: Populate meta if needed
@@ -176,13 +179,13 @@ class GossipSubRouter implements Router {
         final validationResult = await _pubsub?.validateMessage(pubSubMessage);
 
         if (validationResult == null) { // Should not happen if pubsub is attached
-            print('GossipSubRouter: PubSub not available for validation. Message $msgIdStr from $peerId dropped.');
+            _log.warning('GossipSubRouter: PubSub not available for validation. Message $msgIdStr from $peerId dropped.');
             // Optionally trace an error or internal issue
             continue;
         }
 
         if (validationResult == ValidationResult.reject || validationResult == ValidationResult.ignore) {
-          print('GossipSubRouter: Message $msgIdStr from $peerId failed validation ($validationResult). Dropping.');
+          _log.fine('GossipSubRouter: Message $msgIdStr from $peerId failed validation ($validationResult). Dropping.');
           final rejectMsgTrace = trace_pb.TraceEvent_RejectMessage()
             ..messageID = msgIdBytes
             ..receivedFrom = peerId.toBytes()
@@ -199,7 +202,7 @@ class GossipSubRouter implements Router {
 
         // If validation passed (accept), then proceed with duplicate check and processing
         if (_mcache.seen(msgIdStr)) {
-          print('GossipSubRouter: Received duplicate message $msgIdStr from $peerId. Ignoring.');
+          _log.fine('GossipSubRouter: Received duplicate message $msgIdStr from $peerId. Ignoring.');
           final duplicateMsgTrace = trace_pb.TraceEvent_DuplicateMessage()
             ..messageID = msgIdBytes
             ..receivedFrom = peerId.toBytes()
@@ -212,7 +215,7 @@ class GossipSubRouter implements Router {
           continue;
         }
         acceptedMessageIds.add(msgIdStr);
-        print('GossipSubRouter: Received new message $msgIdStr from $peerId to process/forward.');
+        _log.fine('GossipSubRouter: Received new message $msgIdStr from $peerId to process/forward.');
         _mcache.put(msgProto);
 
         // Trace DELIVER_MESSAGE as the router has accepted it for processing/forwarding
@@ -238,7 +241,7 @@ class GossipSubRouter implements Router {
             // TODO: Check if this peer has already seen the message (e.g. via mcache or a per-peer seen cache)
             // For now, assume mcache check at their end is sufficient, or rely on not sending back to source.
             
-            print('GossipSubRouter: Forwarding message $msgIdStr on topic $topicId to mesh peer ${meshPeerId.toBase58()}');
+            _log.fine('GossipSubRouter: Forwarding message $msgIdStr on topic $topicId to mesh peer ${meshPeerId.toBase58()}');
             final messageMeta = trace_pb.TraceEvent_MessageMeta()
               ..messageID = msgIdBytes
               ..topic = topicId;
@@ -255,7 +258,7 @@ class GossipSubRouter implements Router {
             forwardedCount++;
           }
           if (forwardedCount > 0) {
-            print('GossipSubRouter: Forwarded message $msgIdStr to $forwardedCount mesh peers for topic $topicId.');
+            _log.fine('GossipSubRouter: Forwarded message $msgIdStr to $forwardedCount mesh peers for topic $topicId.');
           }
         }
         
@@ -276,14 +279,14 @@ class GossipSubRouter implements Router {
       for (final subOpt in rpc.subscriptions) {
         final topicId = subOpt.topicid;
         if (subOpt.subscribe) {
-          print('GossipSubRouter: Received SUBSCRIBE from $peerId for topic $topicId');
+          _log.fine('GossipSubRouter: Received SUBSCRIBE from $peerId for topic $topicId');
           // Track peer's subscription and add to mesh if we also subscribe to this topic
           _peerTopics.putIfAbsent(peerId, () => <String>{}).add(topicId);
           if (mesh.containsKey(topicId)) {
             mesh[topicId]!.add(peerId);
           }
         } else {
-          print('GossipSubRouter: Received UNSUBSCRIBE from $peerId for topic $topicId');
+          _log.fine('GossipSubRouter: Received UNSUBSCRIBE from $peerId for topic $topicId');
           _peerTopics[peerId]?.remove(topicId);
           mesh[topicId]?.remove(peerId);
         }
@@ -293,7 +296,7 @@ class GossipSubRouter implements Router {
     if (rpc.hasControl()) {
       final control = rpc.control;
       if (control.ihave.isNotEmpty) {
-        print('GossipSubRouter: Received IHAVE from $peerId with ${control.ihave.length} entries.');
+        _log.fine('GossipSubRouter: Received IHAVE from $peerId with ${control.ihave.length} entries.');
         final List<String> wantedMessageIds = [];
         for (final ihaveEntry in control.ihave) {
           for (final msgId in ihaveEntry.messageIDs) {
@@ -303,7 +306,7 @@ class GossipSubRouter implements Router {
           }
         }
         if (wantedMessageIds.isNotEmpty) {
-          print('GossipSubRouter: Requesting ${wantedMessageIds.length} messages via IWANT from $peerId.');
+          _log.fine('GossipSubRouter: Requesting ${wantedMessageIds.length} messages via IWANT from $peerId.');
           final iwantControl = pb.ControlIWant()..messageIDs.addAll(wantedMessageIds);
           final controlMsgToSend = pb.ControlMessage()..iwant.add(iwantControl);
           final rpcToSend = pb.RPC()..control = controlMsgToSend;
@@ -326,12 +329,12 @@ class GossipSubRouter implements Router {
           );
           _rpcQueueManager.sendRpc(peerId, rpcToSend, protocolId: gossipSubIDv11);
         } else {
-          print('GossipSubRouter: No new messages wanted from IHAVE by $peerId.');
+          _log.fine('GossipSubRouter: No new messages wanted from IHAVE by $peerId.');
         }
       }
 
       if (control.iwant.isNotEmpty) {
-        print('GossipSubRouter: Received IWANT from $peerId with ${control.iwant.length} entries.');
+        _log.fine('GossipSubRouter: Received IWANT from $peerId with ${control.iwant.length} entries.');
         final List<pb.Message> messagesToSend = [];
         for (final iwantEntry in control.iwant) {
           for (final msgId in iwantEntry.messageIDs) {
@@ -339,12 +342,12 @@ class GossipSubRouter implements Router {
             if (msg != null) {
               messagesToSend.add(msg);
             } else {
-              print('GossipSubRouter: Peer $peerId wanted message $msgId which we do not have.');
+              _log.fine('GossipSubRouter: Peer $peerId wanted message $msgId which we do not have.');
             }
           }
         }
         if (messagesToSend.isNotEmpty) {
-          print('GossipSubRouter: Sending ${messagesToSend.length} messages to $peerId in response to IWANT.');
+          _log.fine('GossipSubRouter: Sending ${messagesToSend.length} messages to $peerId in response to IWANT.');
           final rpcToSend = pb.RPC()..publish.addAll(messagesToSend);
 
           final rpcMeta = trace_pb.TraceEvent_RPCMeta();
@@ -368,7 +371,7 @@ class GossipSubRouter implements Router {
       if (control.graft.isNotEmpty) {
         for (final graft_msg in control.graft) {
           final topicId = graft_msg.topicID;
-          print('GossipSubRouter: Received GRAFT from $peerId for topic $topicId.');
+          _log.fine('GossipSubRouter: Received GRAFT from $peerId for topic $topicId.');
           final graftTrace = trace_pb.TraceEvent_Graft()
             ..peerID = peerId.toBytes()
             ..topic = topicId;
@@ -382,13 +385,13 @@ class GossipSubRouter implements Router {
           
           // Protect mesh peer connection to prevent premature disconnection
           _pubsub?.host?.connManager.protect(peerId, 'gossipsub-mesh');
-          print('GossipSubRouter: Protected mesh peer $peerId for topic $topicId');
+          _log.fine('GossipSubRouter: Protected mesh peer $peerId for topic $topicId');
         }
       }
       if (control.prune.isNotEmpty) {
         for (final prune_msg in control.prune) {
           final topicId = prune_msg.topicID;
-          print('GossipSubRouter: Received PRUNE from $peerId for topic $topicId.');
+          _log.fine('GossipSubRouter: Received PRUNE from $peerId for topic $topicId.');
           final pruneTrace = trace_pb.TraceEvent_Prune()
             ..peerID = peerId.toBytes()
             ..topic = topicId;
@@ -402,12 +405,12 @@ class GossipSubRouter implements Router {
           // Unprotect peer if not in any other mesh
           if (!_isPeerInAnyMesh(peerId)) {
             _pubsub?.host?.connManager.unprotect(peerId, 'gossipsub-mesh');
-            print('GossipSubRouter: Unprotected peer $peerId (not in any mesh)');
+            _log.fine('GossipSubRouter: Unprotected peer $peerId (not in any mesh)');
           }
         }
       }
       if (control.idontwant.isNotEmpty) {
-        print('GossipSubRouter: Received IDONTWANT from $peerId.');
+        _log.fine('GossipSubRouter: Received IDONTWANT from $peerId.');
       }
     }
     return acceptedMessageIds;
@@ -416,10 +419,10 @@ class GossipSubRouter implements Router {
   @override
   Future<void> publish(PubSubMessage message) async {
     final topicId = message.topic;
-    print('GossipSubRouter: Publishing message for topic $topicId from ${message.from.toBase58()}');
+    _log.fine('GossipSubRouter: Publishing message for topic $topicId from ${message.from.toBase58()}');
 
     if (_pubsub == null || _pubsub?.comms == null) {
-      print('GossipSubRouter: PubSub or comms not attached. Cannot publish.');
+      _log.warning('GossipSubRouter: PubSub or comms not attached. Cannot publish.');
       return;
     }
 
@@ -451,9 +454,9 @@ class GossipSubRouter implements Router {
         fanout[topicId] = newFanout;
         fanoutLastPublished[topicId] = DateTime.now();
         peersToPublish.addAll(newFanout);
-        print('GossipSubRouter: Built fanout for publish-only topic $topicId with ${newFanout.length} peers from _peerTopics.');
+        _log.fine('GossipSubRouter: Built fanout for publish-only topic $topicId with ${newFanout.length} peers from _peerTopics.');
       } else {
-        print('GossipSubRouter: No peers in mesh, fanout, or _peerTopics for topic $topicId to publish to.');
+        _log.fine('GossipSubRouter: No peers in mesh, fanout, or _peerTopics for topic $topicId to publish to.');
       }
     }
 
@@ -461,7 +464,7 @@ class GossipSubRouter implements Router {
       if (peerId == message.receivedFrom) {
         continue;
       }
-      print('GossipSubRouter: Sending message on topic $topicId to peer ${peerId.toBase58()}');
+      _log.fine('GossipSubRouter: Sending message on topic $topicId to peer ${peerId.toBase58()}');
       try {
         // Note: The actual PUBLISH_MESSAGE trace is done in PubSub.publish
         // Here we trace the SEND_RPC event for this specific peer.
@@ -479,7 +482,7 @@ class GossipSubRouter implements Router {
         );
         _rpcQueueManager.sendRpc(peerId, rpcToSend, protocolId: gossipSubIDv11);
       } catch (e) {
-        print('GossipSubRouter: Error enqueuing message to peer ${peerId.toBase58()}: $e');
+        _log.fine('GossipSubRouter: Error enqueuing message to peer ${peerId.toBase58()}: $e');
       }
     }
 
@@ -512,7 +515,7 @@ class GossipSubRouter implements Router {
           final ihaveRpc = pb.RPC()..control = controlMsgToSend;
 
         for (final peerId in selectedIhavePeers) {
-          print('GossipSubRouter: Sending IHAVE for message $msgIdStr on topic $topicId to peer ${peerId.toBase58()}');
+          _log.fine('GossipSubRouter: Sending IHAVE for message $msgIdStr on topic $topicId to peer ${peerId.toBase58()}');
           final controlMeta = trace_pb.TraceEvent_ControlMeta();
           controlMsgToSend.ihave.forEach((ihave) { // Assuming controlMsgToSend is pb.ControlMessage
             controlMeta.ihave.add(trace_pb.TraceEvent_ControlIHaveMeta()
@@ -537,7 +540,7 @@ class GossipSubRouter implements Router {
   @override
   Future<void> join(Topic topic) async {
     final topicId = topic.name;
-    print('GossipSubRouter: Joining topic $topicId');
+    _log.fine('GossipSubRouter: Joining topic $topicId');
 
     // Removed Diagnostic prints
     // if (_pubsub == null) {
@@ -603,7 +606,7 @@ class GossipSubRouter implements Router {
   @override
   Future<void> leave(Topic topic) async {
     final topicId = topic.name;
-    print('GossipSubRouter: Leaving topic $topicId');
+    _log.fine('GossipSubRouter: Leaving topic $topicId');
     final leaveTrace = trace_pb.TraceEvent_Leave()..topic = topicId;
     _pubsub?.tracer.trace(trace_pb.TraceEvent()
       ..type = trace_pb.TraceEvent_Type.LEAVE 
@@ -613,7 +616,7 @@ class GossipSubRouter implements Router {
 
     final meshPeers = mesh[topicId];
     if (meshPeers != null && meshPeers.isNotEmpty) {
-      print('GossipSubRouter: TODO - Send PRUNE to ${meshPeers.length} peers for topic $topicId.');
+      _log.fine('GossipSubRouter: TODO - Send PRUNE to ${meshPeers.length} peers for topic $topicId.');
       // Example of tracing a sent PRUNE:
       // for (final peerToPrune in List<PeerId>.from(meshPeers)) {
       //   final pruneCtrl = pb.ControlPrune()..topicID = topicId;
@@ -642,7 +645,7 @@ class GossipSubRouter implements Router {
     _mcache.start();
     _heartbeatTimer?.cancel();
     _heartbeatTimer = Timer.periodic(params.fanoutTTL, (_) => _heartbeat());
-    print('GossipSubRouter started, mcache and heartbeat timers initiated.');
+    _log.fine('GossipSubRouter started, mcache and heartbeat timers initiated.');
   }
 
   @override
@@ -650,7 +653,7 @@ class GossipSubRouter implements Router {
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
     _mcache.dispose();
-    print('GossipSubRouter stopped, mcache and heartbeat timers stopped.');
+    _log.fine('GossipSubRouter stopped, mcache and heartbeat timers stopped.');
   }
 
   /// Helper method to determine if a peer is "new" and should be treated with permissive grafting criteria
@@ -689,7 +692,7 @@ class GossipSubRouter implements Router {
   }
 
   void _heartbeat() {
-    print('GossipSubRouter: Heartbeat tick');
+    _log.fine('GossipSubRouter: Heartbeat tick');
     final now = DateTime.now();
 
     // Refresh scores for all known peers
@@ -715,7 +718,7 @@ class GossipSubRouter implements Router {
         final score = _pubsub?.getPeerScore(peerId) ?? -double.infinity;
         if (score >= params.opportunisticGraftScoreThreshold) {
           if (currentMeshPeers.length < params.DHigh) { // Double check before grafting
-            print('Heartbeat: Opportunistically GRAFTing ${peerId.toBase58()} to topic $topicId (score: $score)');
+            _log.fine('Heartbeat: Opportunistically GRAFTing ${peerId.toBase58()} to topic $topicId (score: $score)');
             final graftCtrl = pb.ControlGraft()..topicID = topicId;
             final controlMsg = pb.ControlMessage()..graft.add(graftCtrl);
             final rpc = pb.RPC()..control = controlMsg;
@@ -750,7 +753,7 @@ class GossipSubRouter implements Router {
         final needed = params.D - currentMeshSize;
         if (needed <= 0) return;
 
-        print('Heartbeat: Topic $topicId mesh too small ($currentMeshSize < ${params.DLow}). Need $needed more peers. Attempting to find and GRAFT.');
+        _log.fine('Heartbeat: Topic $topicId mesh too small ($currentMeshSize < ${params.DLow}). Need $needed more peers. Attempting to find and GRAFT.');
 
         // Get potential peers: all connected peers.
         var potentialPeers = _pubsub?.host.network.peers.toList() ?? [];
@@ -763,7 +766,7 @@ class GossipSubRouter implements Router {
           final peerScoreObj = _pubsub?.getPeerScoreObject(peerId);
           if (peerScoreObj == null) {
             // No score object exists - this is a new peer, allow it
-            print('Heartbeat: Allowing new peer ${peerId.toBase58()} for topic $topicId (no score history)');
+            _log.fine('Heartbeat: Allowing new peer ${peerId.toBase58()} for topic $topicId (no score history)');
             return true;
           }
           
@@ -775,7 +778,7 @@ class GossipSubRouter implements Router {
             // For new peers, use a more permissive threshold
             final permissiveThreshold = params.DScore - 5.0;
             if (score >= permissiveThreshold) {
-              print('Heartbeat: Allowing new peer ${peerId.toBase58()} for topic $topicId (score: $score, permissive threshold: $permissiveThreshold)');
+              _log.fine('Heartbeat: Allowing new peer ${peerId.toBase58()} for topic $topicId (score: $score, permissive threshold: $permissiveThreshold)');
               return true;
             }
           }
@@ -785,12 +788,12 @@ class GossipSubRouter implements Router {
             return true;
           }
           
-          print('Heartbeat: Excluding peer ${peerId.toBase58()} for topic $topicId (score: $score, threshold: ${params.DScore}, isNew: $isNewPeer)');
+          _log.fine('Heartbeat: Excluding peer ${peerId.toBase58()} for topic $topicId (score: $score, threshold: ${params.DScore}, isNew: $isNewPeer)');
           return false;
         }).toList();
 
         if (potentialPeers.isEmpty) {
-          print('Heartbeat: No suitable peers found with normal criteria for topic $topicId.');
+          _log.fine('Heartbeat: No suitable peers found with normal criteria for topic $topicId.');
           
           // Fallback: Try with even more permissive criteria
           var fallbackPeers = _pubsub?.host.network.peers.toList() ?? [];
@@ -804,10 +807,10 @@ class GossipSubRouter implements Router {
           }).toList();
           
           if (fallbackPeers.isNotEmpty) {
-            print('Heartbeat: Using fallback criteria, found ${fallbackPeers.length} peers for topic $topicId.');
+            _log.fine('Heartbeat: Using fallback criteria, found ${fallbackPeers.length} peers for topic $topicId.');
             potentialPeers = fallbackPeers;
           } else {
-            print('Heartbeat: No suitable peers found even with fallback criteria for topic $topicId.');
+            _log.fine('Heartbeat: No suitable peers found even with fallback criteria for topic $topicId.');
             return;
           }
         }
@@ -817,7 +820,7 @@ class GossipSubRouter implements Router {
         final peersToGraft = potentialPeers.take(min(needed, potentialPeers.length)).toList();
 
         for (final peerToGraft in peersToGraft) {
-          print('Heartbeat: Sending GRAFT to ${peerToGraft.toBase58()} for topic $topicId.');
+          _log.fine('Heartbeat: Sending GRAFT to ${peerToGraft.toBase58()} for topic $topicId.');
           final graftCtrl = pb.ControlGraft()..topicID = topicId;
           final controlMsg = pb.ControlMessage()..graft.add(graftCtrl);
           final rpc = pb.RPC()..control = controlMsg;
@@ -844,7 +847,7 @@ class GossipSubRouter implements Router {
         }
       } else if (currentMeshSize > params.DHigh) {
         final excess = currentMeshSize - params.D; // Number of peers to prune to reach D
-        print('Heartbeat: Topic $topicId mesh too large ($currentMeshSize > ${params.DHigh}). Need to prune $excess peers.');
+        _log.fine('Heartbeat: Topic $topicId mesh too large ($currentMeshSize > ${params.DHigh}). Need to prune $excess peers.');
 
         // Sort peers by score, lowest first. If scores are equal, order is not critical.
         // Peers with no score or lower scores are pruned first.
@@ -858,7 +861,7 @@ class GossipSubRouter implements Router {
         final peersToPrune = sortedMeshPeers.take(excess).toList();
 
         for (final peerToPrune in peersToPrune) {
-          print('Heartbeat: Sending PRUNE to ${peerToPrune.toBase58()} for topic $topicId.');
+          _log.fine('Heartbeat: Sending PRUNE to ${peerToPrune.toBase58()} for topic $topicId.');
           
           // Construct PRUNE control message
           final pruneCtrl = pb.ControlPrune()..topicID = topicId;
@@ -877,7 +880,7 @@ class GossipSubRouter implements Router {
           }
           if (pxPeers.isNotEmpty) {
             pruneCtrl.peers.addAll(pxPeers);
-            print('Heartbeat: Adding ${pxPeers.length} PX peers to PRUNE for ${peerToPrune.toBase58()} on topic $topicId.');
+            _log.fine('Heartbeat: Adding ${pxPeers.length} PX peers to PRUNE for ${peerToPrune.toBase58()} on topic $topicId.');
           }
 
           // TODO: Add backoff logic for PRUNE as per spec (ControlPrune.backoff)
@@ -908,7 +911,7 @@ class GossipSubRouter implements Router {
           // Unprotect peer if not in any other mesh
           if (!_isPeerInAnyMesh(peerToPrune)) {
             _pubsub?.host?.connManager.unprotect(peerToPrune, 'gossipsub-mesh');
-            print('Heartbeat: Unprotected pruned peer $peerToPrune (not in any mesh)');
+            _log.fine('Heartbeat: Unprotected pruned peer $peerToPrune (not in any mesh)');
           }
 
           // Also trace the PRUNE event itself
@@ -928,11 +931,11 @@ class GossipSubRouter implements Router {
     fanout.forEach((topicId, fanoutPeers) {
       final lastPub = fanoutLastPublished[topicId];
       if (lastPub == null || now.difference(lastPub) > params.fanoutTTL) {
-        print('Heartbeat: Fanout TTL expired for topic $topicId. Removing from fanout.');
+        _log.fine('Heartbeat: Fanout TTL expired for topic $topicId. Removing from fanout.');
         topicsToRemoveFromFanout.add(topicId);
       } else if (fanoutPeers.length < params.D) {
         final needed = params.D - fanoutPeers.length;
-        print('Heartbeat: Fanout for topic $topicId too small (${fanoutPeers.length} < ${params.D}). Need $needed more fanout peers.');
+        _log.fine('Heartbeat: Fanout for topic $topicId too small (${fanoutPeers.length} < ${params.D}). Need $needed more fanout peers.');
 
         var potentialFanoutPeers = _pubsub?.host.network.peers.toList() ?? [];
         potentialFanoutPeers = potentialFanoutPeers.where((peerId) {
@@ -945,12 +948,12 @@ class GossipSubRouter implements Router {
         }).toList();
 
         if (potentialFanoutPeers.isEmpty) {
-          print('Heartbeat: No suitable peers found to add to fanout for topic $topicId.');
+          _log.fine('Heartbeat: No suitable peers found to add to fanout for topic $topicId.');
         } else {
           potentialFanoutPeers.shuffle();
           final peersToAdd = potentialFanoutPeers.take(min(needed, potentialFanoutPeers.length)).toList();
           for (final peerToAdd in peersToAdd) {
-            print('Heartbeat: Adding ${peerToAdd.toBase58()} to fanout for topic $topicId.');
+            _log.fine('Heartbeat: Adding ${peerToAdd.toBase58()} to fanout for topic $topicId.');
             fanout[topicId]!.add(peerToAdd);
           }
         }

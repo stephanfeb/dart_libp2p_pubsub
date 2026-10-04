@@ -6,6 +6,9 @@ import 'package:dart_libp2p/core/crypto/pb/crypto.pb.dart' as crypto_pb;
 
 import '../pb/rpc.pb.dart' as pb;
 import 'message.dart';
+import 'package:logging/logging.dart';
+
+final _log = Logger('Sign');
 
 /// The signing prefix used by go-libp2p-pubsub.
 const String _signPrefix = 'libp2p-pubsub:';
@@ -61,7 +64,7 @@ Future<bool> verifyMessageSignature(PubSubMessage pubsubMessage) async {
 
   if (rpcMessage.signature.isEmpty) {
     // STRICT SIGNING: Reject messages without signatures
-    print('Verification: Message has no signature. Rejecting (strict mode).');
+    _log.fine('Verification: Message has no signature. Rejecting (strict mode).');
     return false;
   }
 
@@ -76,14 +79,14 @@ Future<bool> verifyMessageSignature(PubSubMessage pubsubMessage) async {
       final pbKey = crypto_pb.PublicKey.fromBuffer(rpcMessage.key);
       publicKey = publicKeyFromProto(pbKey);
     } catch (e) {
-      print('Verification: Error obtaining public key for ${senderPeerId.toBase58()}: $e');
+      _log.fine('Verification: Error obtaining public key for ${senderPeerId.toBase58()}: $e');
       return false;
     }
   } else {
     // Key not in message — extract from sender's PeerId (Ed25519 inline keys)
     publicKey = await senderPeerId.extractPublicKey();
     if (publicKey == null) {
-      print('Verification: Message has no public key and cannot extract from PeerId. Rejecting.');
+      _log.fine('Verification: Message has no public key and cannot extract from PeerId. Rejecting.');
       return false;
     }
   }
@@ -96,13 +99,13 @@ Future<bool> verifyMessageSignature(PubSubMessage pubsubMessage) async {
   try {
     final isValid = await publicKey.verify(payload, Uint8List.fromList(rpcMessage.signature));
     if (isValid) {
-      print('Verification: Signature VALID for message from ${senderPeerId.toBase58()}');
+      _log.fine('Verification: Signature VALID for message from ${senderPeerId.toBase58()}');
     } else {
-      print('Verification: Signature INVALID for message from ${senderPeerId.toBase58()}');
+      _log.fine('Verification: Signature INVALID for message from ${senderPeerId.toBase58()}');
     }
     return isValid;
   } catch (e) {
-    print('Verification: Error during signature verification for ${senderPeerId.toBase58()}: $e');
+    _log.fine('Verification: Error during signature verification for ${senderPeerId.toBase58()}: $e');
     return false;
   }
 }

@@ -1,4 +1,7 @@
 import 'package:dart_libp2p/core/peer/peer_id.dart';
+import 'package:logging/logging.dart';
+
+final _log = Logger('Blacklist');
 
 /// Manages a list of blacklisted peers.
 ///
@@ -17,7 +20,7 @@ class Blacklist {
   /// If the peer is already blacklisted, this operation has no effect.
   void add(PeerId peerId) {
     if (_blacklistedPeers.add(peerId)) {
-      print('Blacklist: Peer ${peerId.toBase58()} added to blacklist.');
+      _log.fine('Blacklist: Peer ${peerId.toBase58()} added to blacklist.');
     }
   }
 
@@ -26,7 +29,7 @@ class Blacklist {
   /// If the peer is not in the blacklist, this operation has no effect.
   void remove(PeerId peerId) {
     if (_blacklistedPeers.remove(peerId)) {
-      print('Blacklist: Peer ${peerId.toBase58()} removed from blacklist.');
+      _log.fine('Blacklist: Peer ${peerId.toBase58()} removed from blacklist.');
     }
   }
 
@@ -44,7 +47,7 @@ class Blacklist {
   /// Clears all peers from the blacklist.
   void clear() {
     _blacklistedPeers.clear();
-    print('Blacklist: Cleared.');
+    _log.fine('Blacklist: Cleared.');
   }
 
   // TODO: Implement GC mechanism if using TTLs.

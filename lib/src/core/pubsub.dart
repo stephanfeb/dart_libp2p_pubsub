@@ -22,6 +22,9 @@ import '../gossipsub/score.dart'; // For PeerScore
 import '../gossipsub/score_params.dart'; // For PeerScoreParams
 // Ensure MessageIdFunction is available from midgen
 import '../util/midgen.dart';
+import 'package:logging/logging.dart';
+
+final _log = Logger('PubSub');
 
 // TODO: Define Message class to be used in Subscription and PubSub
 // import 'message.dart'; // Or from pb/rpc.pb.dart // This is redundant now
@@ -74,12 +77,12 @@ class PubSub {
     // It's important that the router is attached so it can also set up its
     // own protocol handlers or react to PubSub initialization.
     router.attach(this).then((_) {
-      print('PubSub: Router attached successfully.');
+      _log.fine('PubSub: Router attached successfully.');
       // Optionally, start the router after attachment if it has a start method
       // that should run post-attachment.
       // router.start();
     }).catchError((e, s) {
-      print('PubSub: Error attaching router: $e\n$s');
+      _log.warning('PubSub: Error attaching router: $e\n$s');
       // Handle router attachment failure, e.g., PubSub might not be usable.
     });
   }
@@ -136,7 +139,7 @@ class PubSub {
     // Announce subscription to all connected GossipSub peers
     _announceSubscription(topic, true);
 
-    print('Subscribed to topic: $topic. Subscription created.');
+    _log.fine('Subscribed to topic: $topic. Subscription created.');
     return subscription;
   }
 
@@ -150,7 +153,7 @@ class PubSub {
     final peers = host.network.peers;
     for (final peerId in peers) {
       _comms.sendRpc(peerId, rpc, gossipSubIDv11).catchError((e) {
-        print('PubSub: Error announcing subscription to ${peerId.toBase58()}: $e');
+        _log.fine('PubSub: Error announcing subscription to ${peerId.toBase58()}: $e');
       });
     }
   }
@@ -166,7 +169,7 @@ class PubSub {
         ..topicid = topic);
     }
     _comms.sendRpc(peerId, rpc, gossipSubIDv11).catchError((e) {
-      print('PubSub: Error sending subscriptions to ${peerId.toBase58()}: $e');
+      _log.fine('PubSub: Error sending subscriptions to ${peerId.toBase58()}: $e');
     });
   }
 
@@ -186,9 +189,9 @@ class PubSub {
       if (_subscriptions[topic]?.isEmpty ?? false) {
          _subscriptions.remove(topic);
       }
-      print('All subscriptions for topic "$topic" cancelled and removed.');
+      _log.fine('All subscriptions for topic "$topic" cancelled and removed.');
     } else {
-      print('Not subscribed to topic: $topic, nothing to unsubscribe.');
+      _log.fine('Not subscribed to topic: $topic, nothing to unsubscribe.');
     }
   }
 
@@ -268,7 +271,7 @@ class PubSub {
 
     // Validate the constructed PubSubMessage
     if (await validateMessage(pubSubMessage) != ValidationResult.accept) {
-      print('PubSub: Constructed message for topic "$topic" is invalid. Dropping.');
+      _log.warning('PubSub: Constructed message for topic "$topic" is invalid. Dropping.');
       // Optionally, trace a REJECT_MESSAGE or similar event here if desired for local drops
       return;
     }
@@ -294,7 +297,7 @@ class PubSub {
     if (_subscriptions.containsKey(topic)) {
       final topicSubscriptions = _subscriptions[topic]!;
       if (topicSubscriptions.isNotEmpty) {
-        print('PubSub: Delivering local message to ${topicSubscriptions.length} subscribers on topic "$topic".');
+        _log.fine('PubSub: Delivering local message to ${topicSubscriptions.length} subscribers on topic "$topic".');
         for (final sub in List<Subscription>.from(topicSubscriptions)) {
           // Subscription.deliver expects 'dynamic'. We can pass PubSubMessage or just its data.
           // For consistency with network messages, PubSubMessage might be better.
@@ -306,20 +309,20 @@ class PubSub {
 
   // TODO: Add start() and stop() methods to PubSub to manage lifecycle of router and comms.
   Future<void> start() async {
-    print('PubSub: Starting...');
+    _log.fine('PubSub: Starting...');
     await tracer.start();
     await router.start();
     // _comms is started implicitly by its constructor (registers handlers).
-    print('PubSub: Started successfully.');
+    _log.fine('PubSub: Started successfully.');
   }
 
   Future<void> stop() async {
-    print('PubSub: Stopping...');
+    _log.fine('PubSub: Stopping...');
     await router.stop();
     await _comms.close(); // Unregisters protocol handlers
     await tracer.stop();
     await tracer.dispose();
-    print('PubSub: Stopped successfully.');
+    _log.fine('PubSub: Stopped successfully.');
   }
 
   /// Delivers a message to local subscribers.
@@ -340,7 +343,7 @@ class PubSub {
     if (_subscriptions.containsKey(topic)) {
       final topicSubscriptions = _subscriptions[topic]!;
       if (topicSubscriptions.isNotEmpty) {
-        print('PubSub: Delivering network message on topic "$topic" from ${message.receivedFrom?.toBase58() ?? "unknown"} to ${topicSubscriptions.length} local subscribers.');
+        _log.fine('PubSub: Delivering network message on topic "$topic" from ${message.receivedFrom?.toBase58() ?? "unknown"} to ${topicSubscriptions.length} local subscribers.');
         for (final sub in List<Subscription>.from(topicSubscriptions)) {
           // Subscription.deliver expects 'dynamic'. We pass the PubSubMessage.
           sub.deliver(message);
@@ -357,7 +360,7 @@ class PubSub {
     // like initializing scores.
     if (!peerScores.containsKey(peerId)) {
       peerScores[peerId] = PeerScore(peerId, scoreParams);
-      print('PubSub: Initialized score for new peer ${peerId.toBase58()}');
+      _log.fine('PubSub: Initialized score for new peer ${peerId.toBase58()}');
     }
   }
 
@@ -368,10 +371,10 @@ class PubSub {
     
     // Close the persistent stream to this peer
     _comms.closePeerStream(peerId).catchError((e) {
-      print('PubSub: Error closing stream to ${peerId.toBase58()}: $e');
+      _log.fine('PubSub: Error closing stream to ${peerId.toBase58()}: $e');
     });
     
-    print('PubSub: Removed score for disconnected peer ${peerId.toBase58()}');
+    _log.fine('PubSub: Removed score for disconnected peer ${peerId.toBase58()}');
   }
 
   /// Retrieves the current score for a given peer.
@@ -379,7 +382,7 @@ class PubSub {
   /// For GossipSub, it's important that peers have a score entry.
   double? getPeerScore(PeerId peerId) {
     final peerScoreInstance = peerScores.putIfAbsent(peerId, () {
-      print('PubSub: Peer ${peerId.toBase58()} not found in scores, creating new entry with neutral score.');
+      _log.fine('PubSub: Peer ${peerId.toBase58()} not found in scores, creating new entry with neutral score.');
       return PeerScore(peerId, scoreParams);
     });
     return peerScoreInstance.score;
@@ -389,7 +392,7 @@ class PubSub {
   /// to record specific scoring events.
   PeerScore? getPeerScoreObject(PeerId peerId) {
      return peerScores.putIfAbsent(peerId, () {
-      print('PubSub: Peer ${peerId.toBase58()} not found in scores, creating new entry for object access.');
+      _log.fine('PubSub: Peer ${peerId.toBase58()} not found in scores, creating new entry for object access.');
       return PeerScore(peerId, scoreParams);
     });
   }

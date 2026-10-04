@@ -4,6 +4,9 @@ import 'dart:typed_data'; // For Uint8List in getMessageId
 
 import '../pb/rpc.pb.dart' as pb; // For pb.Message
 import '../util/midgen.dart'; // For defaultMessageIdFn
+import 'package:logging/logging.dart';
+
+final _log = Logger('MessageCache');
 
 // Default configuration for the message cache.
 // These could be made configurable via GossipSubParams or similar.
@@ -172,6 +175,6 @@ class MessageCache {
     stop(); // Stop the shift timer
     _history.clear();
     _messages.clear();
-    print('MessageCache disposed.');
+    _log.fine('MessageCache disposed.');
   }
 }

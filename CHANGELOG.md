@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.4.2 - 2026-10-04
+
+### Fixed
+- **Library code wrote debug output to stdout with `print`.** A GossipSub node printed several lines for every message and RPC, which buried an application's own output. The library now logs through `package:logging`, with one named logger per component (`PubSub`, `PubSubComm`, `GossipSubRouter`, `RpcQueue`, `Validation`, `Sign`, and so on). Applications control the output with `Logger.root.level` or hierarchical logging. Routine traffic and problems caused by remote peers log at `FINE` (per-RPC queue chatter at `FINEST`); local faults, such as an error in an application callback, log at `WARNING`. `JsonEventTracer` and `PbEventTracer` still print their trace output when no sink is given, as documented.
+
 ## 1.4.1 - 2026-10-04
 
 ### Fixed

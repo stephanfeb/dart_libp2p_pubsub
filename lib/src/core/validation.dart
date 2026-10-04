@@ -5,6 +5,9 @@ import 'package:dart_libp2p/core/crypto/pb/crypto.pb.dart' as crypto_pb;
 import 'sign.dart';
 
 import 'dart:typed_data';
+import 'package:logging/logging.dart';
+
+final _log = Logger('Validation');
 
 // Default maximum size for a pubsub message, in bytes.
 // (1MB as in go-libp2p-pubsub)
@@ -40,26 +43,26 @@ ValidationResult validateMessageStructure(
   // The PubSubMessage.from getter already attempts to parse it.
   // Here, we check the source bytes.
   if (rpcMsg.from.isEmpty) {
-    print('Validation: Message rpcMessage.from (source PeerId bytes) is empty.');
+    _log.fine('Validation: Message rpcMessage.from (source PeerId bytes) is empty.');
     return ValidationResult.reject;
   }
 
   // Check: 'seqno' field (sequence number raw bytes) must be present.
   if (rpcMsg.seqno.isEmpty) {
-    print('Validation: Message rpcMessage.seqno (sequence number bytes) is empty.');
+    _log.fine('Validation: Message rpcMessage.seqno (sequence number bytes) is empty.');
     return ValidationResult.reject;
   }
 
   // Check: 'topic' field must not be empty.
   if (rpcMsg.topic.isEmpty) {
-    print('Validation: Message rpcMessage.topic is empty.');
+    _log.fine('Validation: Message rpcMessage.topic is empty.');
     return ValidationResult.reject;
   }
   // TODO: Add validation for topic string format if necessary (e.g., valid characters, length).
 
   // Check: 'data' field payload size.
   if (rpcMsg.data.length > maxMessageSize) {
-    print('Validation: Message data size (${rpcMsg.data.length}) exceeds maximum ($maxMessageSize).');
+    _log.fine('Validation: Message data size (${rpcMsg.data.length}) exceeds maximum ($maxMessageSize).');
     return ValidationResult.reject;
   }
 
@@ -80,7 +83,7 @@ Future<ValidationResult> validateMessageSignature(PubSubMessage message) async {
 
   // 1. STRICT SIGNATURE POLICY: Reject messages without signatures
   if (rpcMessage.signature.isEmpty) {
-    print('Validation: Message from ${message.from.toBase58()} rejected - missing signature');
+    _log.fine('Validation: Message from ${message.from.toBase58()} rejected - missing signature');
     return ValidationResult.reject;
   }
 
@@ -92,7 +95,7 @@ Future<ValidationResult> validateMessageSignature(PubSubMessage message) async {
       final pbKey = crypto_pb.PublicKey.fromBuffer(rpcMessage.key);
       publicKey = publicKeyFromProto(pbKey);
     } catch (e) {
-      print('Validation: Message from ${message.from.toBase58()} rejected - invalid public key format: $e');
+      _log.fine('Validation: Message from ${message.from.toBase58()} rejected - invalid public key format: $e');
       return ValidationResult.reject;
     }
   } else {
@@ -100,7 +103,7 @@ Future<ValidationResult> validateMessageSignature(PubSubMessage message) async {
     final senderPeerId = message.from;
     final extracted = await senderPeerId.extractPublicKey();
     if (extracted == null) {
-      print('Validation: Message from ${senderPeerId.toBase58()} rejected - no key in message and cannot extract from PeerId');
+      _log.fine('Validation: Message from ${senderPeerId.toBase58()} rejected - no key in message and cannot extract from PeerId');
       return ValidationResult.reject;
     }
     publicKey = extracted;
@@ -111,7 +114,7 @@ Future<ValidationResult> validateMessageSignature(PubSubMessage message) async {
   // Verify the public key matches the claimed sender PeerId
   final senderPeerId = message.from;
   if (!senderPeerId.matchesPublicKey(publicKey)) {
-    print('Validation: Message from ${message.from.toBase58()} rejected - key-PeerId mismatch');
+    _log.fine('Validation: Message from ${message.from.toBase58()} rejected - key-PeerId mismatch');
     return ValidationResult.reject;
   }
 
@@ -119,11 +122,11 @@ Future<ValidationResult> validateMessageSignature(PubSubMessage message) async {
   try {
     final isValid = await verifyMessageSignature(message);
     if (!isValid) {
-      print('Validation: Message from ${message.from.toBase58()} rejected - invalid signature');
+      _log.fine('Validation: Message from ${message.from.toBase58()} rejected - invalid signature');
       return ValidationResult.reject;
     }
   } catch (e) {
-    print('Validation: Message from ${message.from.toBase58()} rejected - signature verification error: $e');
+    _log.fine('Validation: Message from ${message.from.toBase58()} rejected - signature verification error: $e');
     return ValidationResult.reject;
   }
 
@@ -207,7 +210,7 @@ class BasicSeqnoValidator {
     if (seqnoBytes.isEmpty) {
       // This should ideally be caught by validateMessageStructure,
       // but as a safeguard in BasicSeqnoValidator:
-      print('BasicSeqnoValidator: Message from $peerId has empty sequence number. Rejecting.');
+      _log.fine('BasicSeqnoValidator: Message from $peerId has empty sequence number. Rejecting.');
       return ValidationResult.reject; // Or ignore, depending on strictness for seqno presence
     }
 
@@ -227,12 +230,12 @@ class BasicSeqnoValidator {
             .getUint64(0, Endian.big);
       } else {
         // Handle malformed nonce bytes - perhaps log and ignore or treat as 0
-        print('BasicSeqnoValidator: Malformed nonce bytes for peer $peerId. Length: ${storedNonceBytes.length}');
+        _log.fine('BasicSeqnoValidator: Malformed nonce bytes for peer $peerId. Length: ${storedNonceBytes.length}');
       }
     }
 
     if (seqno <= currentNonce) {
-      print('BasicSeqnoValidator: Message seqno $seqno from $peerId is not greater than current nonce $currentNonce. Ignoring.');
+      _log.fine('BasicSeqnoValidator: Message seqno $seqno from $peerId is not greater than current nonce $currentNonce. Ignoring.');
       return ValidationResult.ignore;
     }
 
@@ -249,7 +252,7 @@ class BasicSeqnoValidator {
     try {
       await _metadataStore.put(peerId, newNonceBytes);
     } catch (e) {
-      print('BasicSeqnoValidator: Error storing peer nonce for $peerId: $e. Accepting message but nonce not updated.');
+      _log.warning('BasicSeqnoValidator: Error storing peer nonce for $peerId: $e. Accepting message but nonce not updated.');
       // Still accept the message as it passed the seqno check, but log the store error.
       return ValidationResult.accept;
     }
