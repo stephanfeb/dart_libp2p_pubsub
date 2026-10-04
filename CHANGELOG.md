@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## Unreleased
+## 1.4.1 - 2026-10-04
 
 ### Fixed
 - **PubSub without a `privateKey` dropped every message it published** (#2). Messages were signed only when a `privateKey` was passed, but validation requires a signature, so `PubSub(host, router)` (as in `example/chat.dart`) rejected its own messages as unsigned. Messages are now signed with the host's own key from its peerstore when no `privateKey` is given, as go-libp2p-pubsub does. A host whose peerstore holds no private key now fails `publish` with a `StateError` instead of dropping the message silently.
