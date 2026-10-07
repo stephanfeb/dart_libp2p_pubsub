@@ -110,6 +110,9 @@ class MockPubSubProtocol implements PubSubProtocol {
   int maxMessageSize = 1 << 20;
 
   @override
+  Duration streamCloseTimeout = defaultStreamCloseTimeout;
+
+  @override
   List<String> get protocols => const ['/meshsub/1.1.0'];
 
   @override

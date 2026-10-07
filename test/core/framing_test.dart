@@ -155,6 +155,61 @@ void main() {
       expect(writes, hasLength(2));
     });
 
+    group('closing', () {
+      const limit = Duration(milliseconds: 50);
+
+      /// A stream whose close() never completes, as when its FIN is stuck
+      /// behind data a stalled peer is not reading.
+      MockP2PStream stalledStream(String id) {
+        final stream = MockP2PStream();
+        when(stream.protocol()).thenReturn(gossipSubIDv11);
+        when(stream.id()).thenReturn(id);
+        when(stream.isClosed).thenReturn(false);
+        when(stream.isWritable).thenReturn(true);
+        when(stream.write(any)).thenAnswer((_) async {});
+        when(stream.close()).thenAnswer((_) => Completer<void>().future);
+        when(stream.reset()).thenAnswer((_) async {});
+        return stream;
+      }
+
+      test('close() does not wait forever for a stalled outbound stream, and resets it', () async {
+        final stream = stalledStream('out');
+        when(host.newStream(any, any, any)).thenAnswer((_) async => stream);
+        final comms = PubSubProtocol(host, (_, __) async {}, streamCloseTimeout: limit);
+        await comms.sendRpc(peer, pb.RPC()..subscriptions.add(pb.RPC_SubOpts()..topicid = 't'), gossipSubIDv11);
+
+        await comms.close().timeout(const Duration(seconds: 2));
+        verify(stream.close()).called(1);
+        verify(stream.reset()).called(1);
+      });
+
+      test('close() closes inbound streams, ending their read loops, without waiting forever', () async {
+        final comms = PubSubProtocol(host, (_, __) async {}, streamCloseTimeout: limit);
+        final stream = stalledStream('in');
+        final pendingRead = Completer<Uint8List>();
+        when(stream.read(any)).thenAnswer((_) => pendingRead.future);
+        // A real stream fails its pending read when it is reset.
+        when(stream.reset()).thenAnswer((_) async => pendingRead.completeError(StateError('reset')));
+
+        final readLoop = handler(stream, peer);
+        await Future<void>.delayed(Duration.zero);
+        await comms.close().timeout(const Duration(seconds: 2));
+        verify(stream.close()).called(1);
+        verify(stream.reset()).called(1);
+        await readLoop.timeout(const Duration(seconds: 2));
+      });
+
+      test('closePeerStream does not wait forever for a stalled stream', () async {
+        final stream = stalledStream('out');
+        when(host.newStream(any, any, any)).thenAnswer((_) async => stream);
+        final comms = PubSubProtocol(host, (_, __) async {}, streamCloseTimeout: limit);
+        await comms.sendRpc(peer, pb.RPC()..subscriptions.add(pb.RPC_SubOpts()..topicid = 't'), gossipSubIDv11);
+
+        await comms.closePeerStream(peer).timeout(const Duration(seconds: 2));
+        verify(stream.reset()).called(1);
+      });
+    });
+
     test('a slow RPC handler does not hold up the next RPCs of the peer', () async {
       final handled = <pb.RPC>[];
       final never = Completer<void>();

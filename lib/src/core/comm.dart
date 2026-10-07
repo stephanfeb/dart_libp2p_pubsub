@@ -49,10 +49,36 @@ class _PersistentStream {
     return previous.then((_) => stream.write(data)).whenComplete(done.complete);
   }
 
-  Future<void> close() async {
+  /// Closes the stream, waiting at most [timeout] (see [closeStream]).
+  Future<void> close(Duration timeout) async {
     if (!_isClosed) {
       _isClosed = true;
-      await stream.close();
+      await closeStream(stream, timeout);
+    }
+  }
+}
+
+/// How long [PubSubProtocol] waits for a stream to close before resetting it.
+const Duration defaultStreamCloseTimeout = Duration(seconds: 2);
+
+/// Closes [stream], waiting at most [timeout], and resets it if the close
+/// fails or takes longer. Never throws.
+///
+/// Closing sends a FIN behind any data already queued on the connection, so
+/// it waits for a slow or stalled remote to read that data; without a limit,
+/// one such peer would hold up [PubSubProtocol.close] forever. The reset is
+/// not awaited, as it can wait on the same connection.
+Future<void> closeStream(P2PStream stream, Duration timeout) async {
+  try {
+    await stream.close().timeout(timeout);
+  } catch (e) {
+    _log.fine('Stream ${stream.id()} did not close cleanly ($e); resetting it');
+    try {
+      stream.reset().catchError((Object e) {
+        _log.fine('Error resetting stream ${stream.id()}: $e');
+      });
+    } catch (e) {
+      _log.fine('Error resetting stream ${stream.id()}: $e');
     }
   }
 }
@@ -86,6 +112,12 @@ class PubSubProtocol {
 
   bool _isClosing = false;
 
+  /// The inbound streams being read, closed by [close].
+  final Set<P2PStream> _inboundStreams = {};
+
+  /// How long to wait for a stream to close before resetting it.
+  final Duration streamCloseTimeout;
+
   /// The maximum size of one RPC, in bytes, in either direction (as
   /// go-libp2p-pubsub's `WithMaxMessageSize`). A peer that sends a larger
   /// frame has its stream reset; [sendRpc] refuses to send a larger RPC.
@@ -97,7 +129,9 @@ class PubSubProtocol {
   /// [_onRpcReceived] is a callback function that will be invoked when a new
   /// RPC message is received from a peer.
   PubSubProtocol(this._host, this._onRpcReceived,
-      {this.maxMessageSize = defaultMaxMessageSize, this.protocols = const [gossipSubIDv11]}) {
+      {this.maxMessageSize = defaultMaxMessageSize,
+      this.protocols = const [gossipSubIDv11],
+      this.streamCloseTimeout = defaultStreamCloseTimeout}) {
     for (final protocol in protocols) {
       _host.setStreamHandler(protocol, _handleNewStreamData);
     }
@@ -115,6 +149,7 @@ class PubSubProtocol {
     onNewInboundPeer?.call(remotePeer, stream.protocol());
     final carryOver = <int>[];
     var failed = false;
+    _inboundStreams.add(stream);
     try {
       while (!stream.isClosed && !_isClosing) {
         final bytes = await _readVarintPrefixed(stream, carryOver);
@@ -133,13 +168,18 @@ class PubSubProtocol {
         _log.fine('Error on inbound PubSub stream from $remotePeer: $e');
       }
     } finally {
+      _inboundStreams.remove(stream);
       if (!stream.isClosed) {
         // As in go-libp2p-pubsub, a stream that failed (an oversized or
         // malformed frame) is reset rather than closed.
-        try {
-          await (failed ? stream.reset() : stream.close());
-        } catch (e) {
-          _log.fine('Error closing inbound PubSub stream from $remotePeer: $e');
+        if (failed) {
+          try {
+            await stream.reset();
+          } catch (e) {
+            _log.fine('Error resetting inbound PubSub stream from $remotePeer: $e');
+          }
+        } else {
+          await closeStream(stream, streamCloseTimeout);
         }
       }
     }
@@ -321,7 +361,7 @@ class PubSubProtocol {
           _log.fine('Stream to $peerId in state ${e.currentState}, removing and retrying...');
           final stream = _outboundStreams.remove(peerId);
           if (stream != null) {
-            await stream.close().catchError((_) {});
+            await stream.close(streamCloseTimeout);
           }
           continue; // Retry
         }
@@ -338,9 +378,7 @@ class PubSubProtocol {
         _log.fine('PubSubProtocol: Identify timeout sending RPC to $peerId. Peer unreachable: $e');
         final stream = _outboundStreams.remove(peerId);
         if (stream != null) {
-          await stream.close().catchError((err) {
-            _log.fine('Error closing stream to $peerId after identify timeout: $err');
-          });
+          await stream.close(streamCloseTimeout);
         }
         // Don't rethrow - this is a recoverable error that the RPC queue will handle
         rethrow;
@@ -349,9 +387,7 @@ class PubSubProtocol {
         _log.fine('PubSubProtocol: Identify error sending RPC to $peerId: $e\n$s');
         final stream = _outboundStreams.remove(peerId);
         if (stream != null) {
-          await stream.close().catchError((err) {
-            _log.fine('Error closing stream to $peerId after identify error: $err');
-          });
+          await stream.close(streamCloseTimeout);
         }
         rethrow;
       } catch (e, s) {
@@ -359,9 +395,7 @@ class PubSubProtocol {
         _log.fine('Error sending RPC to $peerId on $protocolId: $e\n$s');
         final stream = _outboundStreams.remove(peerId);
         if (stream != null) {
-          await stream.close().catchError((err) {
-            _log.fine('Error closing failed stream to $peerId: $err');
-          });
+          await stream.close(streamCloseTimeout);
         }
         rethrow;
       }
@@ -374,7 +408,7 @@ class PubSubProtocol {
     final stream = _outboundStreams.remove(peerId);
     if (stream != null) {
       _log.fine('Closing persistent stream to $peerId');
-      await stream.close();
+      await stream.close(streamCloseTimeout);
     }
   }
 
@@ -382,18 +416,20 @@ class PubSubProtocol {
   Future<void> close() async {
     _isClosing = true;
 
-    // Close all persistent outbound streams
-    _log.fine('Closing ${_outboundStreams.length} persistent streams...');
-    final closeOperations = <Future>[];
-    for (final entry in _outboundStreams.entries) {
-      closeOperations.add(
-        entry.value.close().catchError((e) {
-          _log.fine('Error closing stream to ${entry.key}: $e');
-        })
-      );
-    }
-    await Future.wait(closeOperations);
+    // Close all streams. Each close is bounded by streamCloseTimeout, so a
+    // stalled peer cannot hold up the others or the caller. Closing an
+    // inbound stream ends its read loop.
+    _log.fine('Closing ${_outboundStreams.length} outbound and '
+        '${_inboundStreams.length} inbound streams...');
+    final outbound = _outboundStreams.values.toList();
+    final inbound = _inboundStreams.toList();
     _outboundStreams.clear();
+    _inboundStreams.clear();
+    _negotiated.clear();
+    await Future.wait([
+      for (final stream in outbound) stream.close(streamCloseTimeout),
+      for (final stream in inbound) closeStream(stream, streamCloseTimeout),
+    ]);
 
     // Unregister protocol handlers from the host
     for (final protocol in protocols) {

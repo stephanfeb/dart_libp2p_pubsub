@@ -860,6 +860,15 @@ class MockPubSubProtocol extends _i1.Mock implements _i12.PubSubProtocol {
       ) as List<String>);
 
   @override
+  Duration get streamCloseTimeout => (super.noSuchMethod(
+        Invocation.getter(#streamCloseTimeout),
+        returnValue: _FakeDuration_10(
+          this,
+          Invocation.getter(#streamCloseTimeout),
+        ),
+      ) as Duration);
+
+  @override
   int get maxMessageSize => (super.noSuchMethod(
         Invocation.getter(#maxMessageSize),
         returnValue: 0,
