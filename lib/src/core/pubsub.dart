@@ -10,6 +10,7 @@ import '../pb/rpc.pb.dart' as pb;
 
 import 'subscription.dart';
 import 'router.dart';
+import 'topic.dart';
 import 'comm.dart';
 import 'message.dart'; // For PubSubMessage used in publish
 import 'sign.dart'; // For signMessage
@@ -196,6 +197,7 @@ class PubSub {
   /// Returns a [Subscription] object that can be used to receive messages
   /// and to unsubscribe.
   Subscription subscribe(String topic) {
+    final firstSubscription = _subscriptions[topic]?.isNotEmpty != true;
     _subscriptions.putIfAbsent(topic, () => []);
 
     late Subscription subscription; // Declare subscription here to use in the callback
@@ -207,10 +209,13 @@ class PubSub {
       if (topicSubscriptions != null) {
         topicSubscriptions.remove(subscription);
         if (topicSubscriptions.isEmpty) {
+          // As in go-libp2p-pubsub: the last subscription to a topic
+          // announces the unsubscription and leaves the topic's mesh.
           _subscriptions.remove(topic);
+          _announceSubscription(topic, false);
+          await router.leave(Topic(topic));
         }
       }
-      // Additional cleanup if needed (e.g., notify router)
     }
 
     subscription = Subscription(topic, cancelSubscriptionCallback);
@@ -218,6 +223,14 @@ class PubSub {
 
     // Announce subscription to all connected GossipSub peers
     _announceSubscription(topic, true);
+
+    // As in go-libp2p-pubsub: the first subscription to a topic joins the
+    // topic's mesh.
+    if (firstSubscription) {
+      router.join(Topic(topic)).catchError((e, s) {
+        _log.warning('PubSub: Error joining topic $topic: $e\n$s');
+      });
+    }
 
     _log.fine('Subscribed to topic: $topic. Subscription created.');
     return subscription;

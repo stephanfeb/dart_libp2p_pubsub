@@ -394,6 +394,21 @@ void main() {
       expect(sub2.isCancelled, isTrue);
     });
 
+    test('the first subscription to a topic joins it, and the last one cancelled leaves it', () async {
+      final router = mockRouter as MockRouter;
+      final topic = 'test-topic';
+      final sub1 = pubsub.subscribe(topic);
+      final sub2 = pubsub.subscribe(topic);
+      await pumpEventQueue();
+      expect(router.joinedTopics, equals([topic])); // Joined once
+
+      await sub1.cancel();
+      expect(router.joinedTopics, equals([topic])); // sub2 is still active
+
+      await sub2.cancel();
+      expect(router.joinedTopics, isEmpty);
+    });
+
     // TODO: Add tests for message validation registration and invocation.
     // TODO: Add tests for publish with validation failure.
     // TODO: Add tests for tracer integration (how to verify trace calls).

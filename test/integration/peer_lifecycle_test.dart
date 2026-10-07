@@ -89,6 +89,20 @@ void main() {
     expect(utf8.decode(message.data), equals('hello'));
   }, timeout: const Timeout(Duration(seconds: 60)));
 
+  test('unsubscribing PRUNEs the mesh peers', () async {
+    final subscription = a.pubsub.subscribe(topic);
+    b.pubsub.subscribe(topic);
+    await a.connect(b);
+    await _until(() => b.router.mesh[topic]?.contains(a.id) ?? false,
+        reason: 'B to GRAFT A');
+
+    await subscription.cancel();
+
+    await _until(() => !(b.router.mesh[topic]?.contains(a.id) ?? false),
+        reason: 'B to remove A from its mesh');
+    expect(a.router.mesh, isNot(contains(topic)));
+  }, timeout: const Timeout(Duration(seconds: 60)));
+
   test('a peer that disconnects leaves the mesh and keeps its score', () async {
     a.pubsub.subscribe(topic);
     b.pubsub.subscribe(topic);
