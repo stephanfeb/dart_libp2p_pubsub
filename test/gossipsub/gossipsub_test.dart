@@ -255,6 +255,21 @@ void main() {
         }
       });
 
+      test('removePeer forgets the subscriptions of the peer', () async {
+        final peer = makePeer(50);
+        when(mockNetwork.peers).thenReturn([peer]);
+        await subscribeRemote(peer, testTopicName);
+        await router.removePeer(peer);
+        // The peer reconnects but has not sent its subscriptions again.
+        final sent = captureSentRpcs();
+
+        await router.join(testTopic);
+        await pumpEventQueue();
+
+        expect(router.mesh[testTopicName], isEmpty);
+        expect(sent, isEmpty);
+      });
+
       test('leave sends PRUNE with the unsubscribe backoff to each mesh peer', () async {
         final meshPeers = [makePeer(40), makePeer(41)];
         when(mockNetwork.peers).thenReturn(meshPeers);
@@ -1642,6 +1657,40 @@ void main() {
           // Verify mesh state
           expect(testRouter.mesh[testTopicName]!.length, equals(3)); // 2 existing + 1 opp graft
           expect(testRouter.mesh[testTopicName], containsAll([mockExistingMeshPeer1, mockExistingMeshPeer2, mockOppGraftPeer1]));
+
+          testRouter.stop();
+        });
+      });
+
+      test('heartbeat removes the peers that are no longer connected', () {
+        fakeAsync((async) {
+          router.stop();
+          final testRouter = GossipSubRouter(params: GossipSubParams());
+          clearInteractions(mockPubsub);
+          when(mockPubsub.getTopics()).thenReturn([testTopicName]);
+
+          final stayingPeer = MockPeerId();
+          when(stayingPeer.toBytes()).thenReturn(Uint8List.fromList([0x00, 0x01, 0x60]));
+          when(stayingPeer.toBase58()).thenReturn('QmStaying');
+          final leavingPeer = MockPeerId();
+          when(leavingPeer.toBytes()).thenReturn(Uint8List.fromList([0x00, 0x01, 0x61]));
+          when(leavingPeer.toBase58()).thenReturn('QmLeaving');
+
+          testRouter.attach(mockPubsub);
+          testRouter.join(testTopic);
+          subscribePeers(async, testRouter, [stayingPeer, leavingPeer],
+              mesh: {stayingPeer, leavingPeer});
+          testRouter.fanout['other-topic'] = {leavingPeer};
+          testRouter.fanoutLastPublished['other-topic'] = DateTime.now(); // Not expired
+          when(mockNetwork.peers).thenReturn([stayingPeer]);
+
+          testRouter.start();
+          async.elapse(testRouter.params.heartbeatInitialDelay);
+
+          expect(testRouter.mesh[testTopicName], equals({stayingPeer}));
+          expect(testRouter.fanout['other-topic'], isEmpty);
+          verify(mockPubsub.removePeer(leavingPeer)).called(1);
+          verifyNever(mockPubsub.removePeer(stayingPeer));
 
           testRouter.stop();
         });

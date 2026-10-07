@@ -187,6 +187,7 @@ class GossipSubRouter implements Router {
     );
     mesh.forEach((topic, peers) => peers.remove(peerId));
     fanout.forEach((topic, peers) => peers.remove(peerId));
+    _peerTopics.remove(peerId);
     _rpcQueueManager.peerDisconnected(peerId);
     
     // Unprotect peer since it's no longer in any mesh
@@ -797,6 +798,21 @@ class GossipSubRouter implements Router {
     _log.fine('GossipSubRouter: Heartbeat tick');
     final now = DateTime.now();
     _heartbeatTicks++;
+
+    // Forget the peers that are no longer connected. PubSub also reports
+    // disconnects as they happen, but the host does not report all of them.
+    final connected = _pubsub?.host.network.peers.toSet();
+    if (connected != null) {
+      final knownPeers = <PeerId>{
+        ..._peerTopics.keys,
+        for (final peers in mesh.values) ...peers,
+        for (final peers in fanout.values) ...peers,
+      };
+      for (final peerId in knownPeers.where((p) => !connected.contains(p))) {
+        _log.fine('Heartbeat: Removing disconnected peer ${peerId.toBase58()}');
+        removePeer(peerId);
+      }
+    }
 
     // Refresh scores for all known peers
     _pubsub?.refreshScores();

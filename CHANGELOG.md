@@ -10,6 +10,8 @@ All notable changes to this project will be documented in this file.
 - **The heartbeat grafted peers that were not subscribed to the topic.** To fill a mesh below `DLow`, and for opportunistic grafting, the heartbeat picked from all connected peers. It now picks only from connected peers subscribed to the topic, as in go-libp2p-pubsub.
 - **Fanout and IHAVE gossip went to peers that were not subscribed to the topic.** The heartbeat filled a topic's fanout, and `publish` chose its `IHAVE` recipients, from all connected peers. Both now pick only from connected peers subscribed to the topic, as in go-libp2p-pubsub.
 - **A SUBSCRIBE added the peer to the mesh.** When a peer announced a subscription to a topic the node had joined, the router added the peer to its mesh without a `GRAFT`, so the peer did not know it was a mesh peer and the mesh could grow past `DHigh` until the next heartbeat. As in go-libp2p-pubsub, a peer now joins the mesh only through `GRAFT`; the heartbeat GRAFTs subscribed peers when the mesh is below `DLow`.
+- **Peers did not exchange subscriptions when they connected.** A node sent its subscriptions only when it subscribed, or to a peer that opened a stream to it, so two nodes that subscribed before they connected did not learn of each other's topics and built no mesh. `PubSub` now sends its subscriptions to each peer that connects, as in go-libp2p-pubsub.
+- **The router kept disconnected peers.** Nothing told the router that a peer had disconnected, so the peer stayed in its meshes, fanouts and record of subscriptions. `PubSub` now calls `GossipSubRouter.removePeer` when the last connection to a peer closes, and the heartbeat removes the peers that are no longer connected, because dart_libp2p does not report every disconnect.
 - **Unsubscribing did not tell the mesh.** `GossipSubRouter.leave` removed the mesh locally only, so the remote peers kept the node in their mesh. It now sends `PRUNE` to each mesh peer, with a backoff of `unsubscribeBackoff`.
 
 ### Added
@@ -17,6 +19,7 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 - Opportunistic grafting runs once every `opportunisticGraftTicks` heartbeats (once a minute by default), as in go-libp2p-pubsub. It used to run on every heartbeat, which was also once a minute.
+- `PubSub.removePeer` no longer deletes the peer's score, so a peer cannot clear its penalties by reconnecting.
 - Peers that the router grafts are protected in the connection manager (tag `gossipsub-mesh`), as peers that graft the node already were.
 
 ## 1.5.0 - 2026-10-08

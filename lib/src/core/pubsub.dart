@@ -3,6 +3,7 @@ import 'dart:async';
 import 'dart:typed_data'; // For Uint8List, ByteData, Endian
 
 import 'package:dart_libp2p/core/host/host.dart';
+import 'package:dart_libp2p/core/network/notifiee.dart';
 import 'package:dart_libp2p/core/peer/peer_id.dart';
 import 'package:dart_libp2p/core/crypto/keys.dart'; // For PrivateKey
 import '../pb/rpc.pb.dart' as pb;
@@ -112,6 +113,11 @@ class PubSub {
 
   final PrivateKey? _privateKey; // For signing outgoing messages
   late final PubSubProtocol _comms;
+
+  /// Sends our subscriptions to each peer that connects, and tells the router
+  /// when a peer disconnects. Registered with the host's network while the
+  /// PubSub is started.
+  Notifiee? _networkNotifiee;
   late final MessageIdGenerator _idGenerator; // For generating sequence numbers
 
   /// Manages scores for known peers.
@@ -526,12 +532,33 @@ class PubSub {
     _log.fine('PubSub: Starting...');
     await tracer.start();
     await router.start();
+    if (_networkNotifiee == null) {
+      final notifiee = NotifyBundle(connectedF: (network, conn, {Duration? dialLatency}) {
+        // As in go-libp2p-pubsub, each side sends its subscriptions to a new
+        // peer, so that both know which topics they share.
+        announceSubscriptionsTo(conn.remotePeer);
+      }, disconnectedF: (network, conn) {
+        final peerId = conn.remotePeer;
+        // A peer can have several connections: it is gone when the last one closes.
+        if (network.connsToPeer(peerId).isNotEmpty) return;
+        router.removePeer(peerId).catchError((e, s) {
+          _log.warning('PubSub: Error removing disconnected peer ${peerId.toBase58()}: $e\n$s');
+        });
+      });
+      host.network.notify(notifiee);
+      _networkNotifiee = notifiee;
+    }
     // _comms is started implicitly by its constructor (registers handlers).
     _log.fine('PubSub: Started successfully.');
   }
 
   Future<void> stop() async {
     _log.fine('PubSub: Stopping...');
+    final notifiee = _networkNotifiee;
+    if (notifiee != null) {
+      host.network.stopNotify(notifiee);
+      _networkNotifiee = null;
+    }
     await router.stop();
     await _comms.close(); // Unregisters protocol handlers
     await tracer.stop();
@@ -579,16 +606,17 @@ class PubSub {
   }
 
   /// Called by the router when a peer disconnects.
+  ///
+  /// The peer's score is kept, so a peer cannot clear its penalties by
+  /// reconnecting.
   void removePeer(PeerId peerId) {
     // Router also calls its own removePeer. This is for PubSub's internal cleanup.
-    peerScores.remove(peerId);
-    
     // Close the persistent stream to this peer
     _comms.closePeerStream(peerId).catchError((e) {
       _log.fine('PubSub: Error closing stream to ${peerId.toBase58()}: $e');
     });
     
-    _log.fine('PubSub: Removed score for disconnected peer ${peerId.toBase58()}');
+    _log.fine('PubSub: Removed disconnected peer ${peerId.toBase58()}');
   }
 
   /// Retrieves the current score for a given peer.
