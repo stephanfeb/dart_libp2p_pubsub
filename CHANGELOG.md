@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## Unreleased
+## 1.5.0 - 2026-10-08
 
 ### Fixed
 - **The application could not control which messages a node relays.** `registerMessageValidator` stored validators that nothing called, and the router forwarded every message with a valid signature to its mesh before the application saw it. Validation now runs before forwarding and delivery: a message is forwarded to the mesh and delivered to subscribers only when it is accepted. `registerMessageValidator((topic, message) => bool)` now works for all topics: `true` accepts and `false` rejects.
