@@ -343,6 +343,12 @@ class GossipSubRouter implements Router {
         for (final graft_msg in control.graft) {
           final topicId = graft_msg.topicID;
           _log.fine('GossipSubRouter: Received GRAFT from $peerId for topic $topicId.');
+          if (!mesh.containsKey(topicId)) {
+            // As in go-libp2p-pubsub: a GRAFT for a topic we have not joined
+            // is ignored.
+            _log.fine('GossipSubRouter: Ignoring GRAFT from $peerId for topic $topicId, which we have not joined.');
+            continue;
+          }
           final graftTrace = trace_pb.TraceEvent_Graft()
             ..peerID = peerId.toBytes()
             ..topic = topicId;
@@ -366,7 +372,6 @@ class GossipSubRouter implements Router {
             _sendPrune(peerId, topicId, backoff: params.pruneBackoff);
             continue;
           }
-          mesh.putIfAbsent(topicId, () => <PeerId>{});
           mesh[topicId]!.add(peerId);
           
           // Protect mesh peer connection to prevent premature disconnection

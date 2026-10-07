@@ -274,6 +274,31 @@ void main() {
         expect(sent, isEmpty);
       });
 
+      pb.RPC graftRpc(String topicName) => pb.RPC()
+        ..control = (pb.ControlMessage()..graft.add(pb.ControlGraft()..topicID = topicName));
+
+      test('a GRAFT for a topic we have not joined is ignored', () async {
+        final peer = makePeer(55);
+        final sent = captureSentRpcs();
+
+        await router.handleRpc(peer, graftRpc('not-joined-topic'));
+        await pumpEventQueue();
+
+        expect(router.mesh, isNot(contains('not-joined-topic')));
+        expect(sent, isEmpty);
+        verifyNever(mockConnManager.protect(peer, any));
+      });
+
+      test('a GRAFT for a joined topic adds the peer to the mesh', () async {
+        final peer = makePeer(56);
+        await router.join(testTopic);
+
+        await router.handleRpc(peer, graftRpc(testTopicName));
+
+        expect(router.mesh[testTopicName], equals({peer}));
+        verify(mockConnManager.protect(peer, 'gossipsub-mesh')).called(1);
+      });
+
       test('removePeer forgets the subscriptions of the peer', () async {
         final peer = makePeer(50);
         when(mockNetwork.peers).thenReturn([peer]);
