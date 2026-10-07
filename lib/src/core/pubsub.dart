@@ -3,13 +3,13 @@ import 'dart:async';
 import 'dart:typed_data'; // For Uint8List, ByteData, Endian
 
 import 'package:dart_libp2p/core/host/host.dart';
-import 'package:dart_libp2p/core/network/notifiee.dart';
 import 'package:dart_libp2p/core/peer/peer_id.dart';
 import 'package:dart_libp2p/core/crypto/keys.dart'; // For PrivateKey
 import '../pb/rpc.pb.dart' as pb;
 
 import 'subscription.dart';
 import 'router.dart';
+import 'notify.dart';
 import 'topic.dart';
 import 'comm.dart';
 import 'message.dart'; // For PubSubMessage used in publish
@@ -116,9 +116,8 @@ class PubSub {
   late final PubSubProtocol _comms;
 
   /// Sends our subscriptions to each peer that connects, and tells the router
-  /// when a peer disconnects. Registered with the host's network while the
-  /// PubSub is started.
-  Notifiee? _networkNotifiee;
+  /// when a peer disconnects. Set while the PubSub is started.
+  PeerNotifier? _peerNotifier;
   late final MessageIdGenerator _idGenerator; // For generating sequence numbers
 
   /// Manages scores for known peers.
@@ -545,21 +544,12 @@ class PubSub {
     _log.fine('PubSub: Starting...');
     await tracer.start();
     await router.start();
-    if (_networkNotifiee == null) {
-      final notifiee = NotifyBundle(connectedF: (network, conn, {Duration? dialLatency}) {
+    if (_peerNotifier == null) {
+      _peerNotifier = PeerNotifier(host)
         // As in go-libp2p-pubsub, each side sends its subscriptions to a new
         // peer, so that both know which topics they share.
-        announceSubscriptionsTo(conn.remotePeer);
-      }, disconnectedF: (network, conn) {
-        final peerId = conn.remotePeer;
-        // A peer can have several connections: it is gone when the last one closes.
-        if (network.connsToPeer(peerId).isNotEmpty) return;
-        router.removePeer(peerId).catchError((e, s) {
-          _log.warning('PubSub: Error removing disconnected peer ${peerId.toBase58()}: $e\n$s');
-        });
-      });
-      host.network.notify(notifiee);
-      _networkNotifiee = notifiee;
+        ..onPeerConnected(announceSubscriptionsTo)
+        ..onPeerDisconnected(router.removePeer);
     }
     // _comms is started implicitly by its constructor (registers handlers).
     _log.fine('PubSub: Started successfully.');
@@ -567,11 +557,8 @@ class PubSub {
 
   Future<void> stop() async {
     _log.fine('PubSub: Stopping...');
-    final notifiee = _networkNotifiee;
-    if (notifiee != null) {
-      host.network.stopNotify(notifiee);
-      _networkNotifiee = null;
-    }
+    _peerNotifier?.dispose();
+    _peerNotifier = null;
     await router.stop();
     await _comms.close(); // Unregisters protocol handlers
     await tracer.stop();
