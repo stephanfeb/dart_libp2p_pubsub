@@ -46,21 +46,21 @@ class JsonEventTracer implements EventTracer {
       }
 
       if (_outputSink != null) {
-        _outputSink!.writeln(outputString);
+        _outputSink.writeln(outputString);
       } else {
         print(outputString);
       }
     } catch (e, s) {
       final errorMessage = 'JsonEventTracer: Error serializing event to JSON or writing: $e\n$s';
       if (_outputSink != null) {
-        _outputSink!.writeln(errorMessage);
+        _outputSink.writeln(errorMessage);
       } else {
         _log.warning(errorMessage);
       }
       // Fallback: print the event's toString() representation
       final fallbackMessage = 'JsonEventTracer: Event (toString): ${event.toString()}';
       if (_outputSink != null) {
-        _outputSink!.writeln(fallbackMessage);
+        _outputSink.writeln(fallbackMessage);
       } else {
         print(fallbackMessage);
       }
@@ -93,7 +93,7 @@ class JsonEventTracer implements EventTracer {
   Future<void> dispose() async {
     await stop(); // Ensure everything is flushed.
     if (_shouldCloseSink && _outputSink != null) {
-      await _outputSink!.close();
+      await _outputSink.close();
       _log.fine('JsonEventTracer: Disposed. Owned sink closed.');
     } else if (_outputSink != null) {
       _log.fine('JsonEventTracer: Disposed. External sink not closed by this instance.');

@@ -412,7 +412,7 @@ class PubSubProtocol {
         
       } on RpcTooLargeException {
         rethrow; // The stream is fine; only this RPC is refused.
-      } on IdentifyTimeoutException catch (e, s) {
+      } on IdentifyTimeoutException catch (e) {
         // Identify timeout - peer may have gone offline. Handle gracefully.
         _log.fine('PubSubProtocol: Identify timeout sending RPC to $peerId. Peer unreachable: $e');
         final stream = _outboundStreams.remove(peerId);

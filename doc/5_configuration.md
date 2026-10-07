@@ -100,6 +100,10 @@ The defaults are go-libp2p-pubsub's.
 
 See [Validating Messages](./2_gossipsub_usage.md#6-validating-messages).
 
+### Blacklist
+
+As go-libp2p-pubsub's `WithBlacklist`, `PubSub(blacklist: Blacklist())` takes the set of blacklisted peers (an empty one by default), and `pubsub.blacklistPeer(peerId)` adds a peer, removing it from the router if it is connected. A blacklisted peer is not added or greeted, its RPCs are ignored, and messages it forwards or wrote are dropped before validation.
+
 ### Peer Scoring
 
 Peer scoring is off by default, as in go-libp2p-pubsub. Turn it on by giving the router both score parameters and thresholds (go-libp2p-pubsub's `WithPeerScore`):

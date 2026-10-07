@@ -61,8 +61,8 @@ class PbEventTracer implements EventTracer {
         // Write length prefix (4-byte BigEndian length)
         final lengthBytes = Uint8List(4);
         ByteData.view(lengthBytes.buffer).setUint32(0, eventBytes.lengthInBytes, Endian.big);
-        _outputSink!.add(lengthBytes);
-        _outputSink!.add(eventBytes);
+        _outputSink.add(lengthBytes);
+        _outputSink.add(eventBytes);
       } else {
         // For console, just print a confirmation and byte length.
         print('PbEventTracer: Serialized TraceEvent (${eventBytes.lengthInBytes} bytes). Type: ${_getTraceEventType(event)}');
@@ -72,7 +72,7 @@ class PbEventTracer implements EventTracer {
       if (_outputSink != null) {
         // Attempt to write error to sink, might fail if sink is the issue.
         try {
-          _outputSink!.writeln(errorMessage); // Assuming sink can handle strings for errors
+          _outputSink.writeln(errorMessage); // Assuming sink can handle strings for errors
         } catch (_) {} // Ignore error during error reporting
       } else {
         _log.warning(errorMessage);
@@ -81,7 +81,7 @@ class PbEventTracer implements EventTracer {
       final fallbackMessage = 'PbEventTracer: Event (toString): ${event.toString()}';
       if (_outputSink != null) {
         try {
-          _outputSink!.writeln(fallbackMessage);
+          _outputSink.writeln(fallbackMessage);
         } catch (_) {}
       } else {
         print(fallbackMessage);
@@ -112,7 +112,7 @@ class PbEventTracer implements EventTracer {
   Future<void> dispose() async {
     await stop(); // Ensure everything is flushed.
     if (_shouldCloseSink && _outputSink != null) {
-      await _outputSink!.close();
+      await _outputSink.close();
       _log.fine('PbEventTracer: Disposed. Owned sink closed.');
     } else if (_outputSink != null) {
       _log.fine('PbEventTracer: Disposed. External sink not closed by this instance.');

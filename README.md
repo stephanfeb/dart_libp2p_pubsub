@@ -36,7 +36,7 @@ Add to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  dart_libp2p_pubsub: ^1.6.0
+  dart_libp2p_pubsub: ^2.0.0
   dart_libp2p: ">=1.0.0 <5.0.0"
 ```
 

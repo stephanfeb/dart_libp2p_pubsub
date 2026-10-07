@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## Unreleased (breaking: 2.0.0)
+## 2.0.0 - 2026-10-08
 
 A review against go-libp2p-pubsub v0.15.0 found remote denial-of-service holes, a crash, interop bugs and a peer-scoring model that did not work. This release fixes them and aligns the router with Go.
 
@@ -45,9 +45,19 @@ A review against go-libp2p-pubsub v0.15.0 found remote denial-of-service holes, 
 - `Router` has `protocols` and `acceptFrom`; `PubSub` now calls `Router.addPeer` for each pubsub peer, sends its hello to every connected peer (including peers connected before `start()`), and announces subscription changes to peers being greeted.
 - Validation no longer blocks reading a peer's stream.
 
+- **The blacklist is enforced**, as go-libp2p-pubsub's `WithBlacklist` and `BlacklistPeer`. `PubSub(blacklist:)` takes a `Blacklist` (now exported) and `PubSub.blacklistPeer` adds a peer, removing it from the router if connected. A blacklisted peer is not added or greeted, its RPCs are ignored, and messages it forwards or wrote are dropped before validation (traced as `blacklisted peer` / `blacklisted source`) without being marked seen. Before, `Blacklist` was not used by anything.
+
 ### Also
+- `dart_libp2p` must be `>=4.0.1 <5.0.0` (was `>=1.0.0`); this release is tested only against 4.0.1.
 - The public library exports the routers, `Router`, `Topic`, the protocol IDs, the message ID helpers and the tracers.
 - README links point to `doc/`.
+
+### Known limitations
+- The PRUNEs we send rarely carry signed peer records: dart_libp2p 4.0.1's identify checks the records of remote peers but does not store them, so we offer mostly records learned through PX. Peer Exchange is tested with mocks, not yet on a real network.
+- The tracers do not yet write Go's format (the protobuf tracer frames events with 4 bytes where Go uses a varint; the JSON tracer writes field numbers, no timestamps, and the remote peer as `peerID`).
+- Topic discovery uses the namespace `gossipsub_topic:` (Go: `floodsub:`) and is not wired into `PubSub`.
+- Messages for topics the node neither subscribes to nor relays are still validated.
+- GossipSub v1.3 extensions are not supported.
 
 ## 1.6.0 - 2026-10-08
 

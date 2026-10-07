@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:collection'; // For LinkedHashMap
-import 'dart:math'; // For Random
 
 /// A cache that stores the first time a key was seen, with a TTL.
 ///
@@ -12,7 +11,6 @@ class FirstSeenCache<K> {
   final int _capacity;
   final LinkedHashMap<K, DateTime> _entries = LinkedHashMap<K, DateTime>();
   Timer? _gcTimer;
-  final Random _random = Random();
 
   /// Creates a new [FirstSeenCache].
   ///

@@ -571,5 +571,27 @@ void main() {
       expect(m.signature, isEmpty);
     });
   });
-}
 
+  group('Blacklist, as go-libp2p-pubsub', () {
+    test('a message from a blacklisted peer is dropped without being marked seen', () async {
+      final receiver = await node();
+      final bad = await node();
+      final good = await node();
+      receiver.pubsub.blacklistPeer(bad.id);
+      final msg = await _signedMessage(good, topic, [1]);
+      expect(await _receive(receiver, bad, msg), isEmpty);
+      // The copy from a good peer is still accepted.
+      expect(await _receive(receiver, good, msg), hasLength(1));
+      expect(_invalid(receiver, bad.id), 0, reason: 'dropped, not penalised as invalid');
+    });
+
+    test('a message written by a blacklisted peer is dropped even when a good peer forwards it', () async {
+      final receiver = await node();
+      final author = await node();
+      final forwarder = await node();
+      receiver.pubsub.blacklistPeer(author.id);
+      expect(await _receive(receiver, forwarder, await _signedMessage(author, topic, [1])), isEmpty);
+      expect(await _receive(receiver, forwarder, await _signedMessage(forwarder, topic, [2])), hasLength(1));
+    });
+  });
+}

@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:math'; // For Random and min/max
 
 /// Defines a factory for creating Backoff timers.

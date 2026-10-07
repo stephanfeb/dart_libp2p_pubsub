@@ -168,4 +168,20 @@ void main() {
       });
     }
   });
+
+  test('blacklisting a connected peer drops it and its messages', () async {
+    final a = await node(GossipSubRouter());
+    final b = await node(GossipSubRouter());
+    await startAll();
+    List<String> texts(_Node n) => n.received.map((m) => String.fromCharCodes(m.data)).toList();
+
+    b.pubsub.blacklistPeer(a.id);
+    await Future.delayed(const Duration(milliseconds: 50));
+    expect((b.router as GossipSubRouter).mesh[topic], isEmpty);
+
+    await publish(a, 'from a');
+    await publish(b, 'from b');
+    expect(texts(b), ['from b']);
+    expect(texts(a), ['from a'], reason: 'b no longer sends to a');
+  });
 }

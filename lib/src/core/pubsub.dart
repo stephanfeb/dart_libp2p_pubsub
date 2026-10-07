@@ -11,6 +11,7 @@ import '../pb/rpc.pb.dart' as pb;
 import 'subscription.dart';
 import 'router.dart';
 import 'notify.dart';
+import 'blacklist.dart';
 import 'topic.dart';
 import 'comm.dart';
 import 'message.dart'; // For PubSubMessage used in publish
@@ -84,6 +85,8 @@ const String _rejectMissingSignature = 'missing signature';
 const String _rejectUnexpectedSignature = 'unexpected signature';
 const String _rejectUnexpectedAuthInfo = 'unexpected auth info';
 const String _rejectSelfOrigin = 'self originated message';
+const String _rejectBlacklistedPeer = 'blacklisted peer';
+const String _rejectBlacklistedSource = 'blacklisted source';
 const String _rejectValidationFailed = 'validation failed';
 const String _rejectValidationIgnored = 'validation ignored';
 const String _rejectValidationThrottled = 'validation throttled';
@@ -127,6 +130,11 @@ class PubSub {
 
   /// Whether our messages omit `from` and `seqno`.
   final bool noAuthor;
+
+  /// The peers whose RPCs and messages are dropped, as go-libp2p-pubsub's
+  /// `WithBlacklist`. Add peers with [blacklistPeer], which also drops a
+  /// peer already connected.
+  final Blacklist blacklist;
 
   final PrivateKey? _privateKey; // For signing outgoing messages
   late final PubSubProtocol _comms;
@@ -182,7 +190,9 @@ class PubSub {
     MessageIdFn messageIdFn = defaultMessageIdFn,
     MessageSignaturePolicy signaturePolicy = MessageSignaturePolicy.strictSign,
     this.noAuthor = false,
+    Blacklist? blacklist,
   }) :
+    blacklist = blacklist ?? Blacklist(),
     signaturePolicy = noAuthor && signaturePolicy.mustSign
         ? (signaturePolicy.mustVerify ? MessageSignaturePolicy.strictNoSign : MessageSignaturePolicy.laxNoSign)
         : signaturePolicy,
@@ -207,6 +217,10 @@ class PubSub {
   }
 
   Future<void> _handleRpc(PeerId peerId, pb.RPC rpc) async {
+    if (blacklist.contains(peerId)) {
+      _log.fine('PubSub: Ignoring RPC from blacklisted peer ${peerId.toBase58()}.');
+      return;
+    }
     // As go-libp2p-pubsub: the router decides whether to handle the RPCs of
     // the peer at all (GossipSub ignores graylisted peers).
     switch (router.acceptFrom(peerId)) {
@@ -308,6 +322,7 @@ class PubSub {
   /// [peerId], as go-libp2p-pubsub does to each new peer. If the peer
   /// accepts the pubsub stream, it is added to the router.
   void announceSubscriptionsTo(PeerId peerId) {
+    if (blacklist.contains(peerId)) return;
     final rpc = pb.RPC();
     for (final topic in _subscriptions.keys) {
       rpc.subscriptions.add(pb.RPC_SubOpts()
@@ -358,8 +373,24 @@ class PubSub {
     });
   }
 
+  /// Blacklists [peerId], as go-libp2p-pubsub's `BlacklistPeer`: its RPCs
+  /// and the messages it forwards or wrote are dropped from now on, and if
+  /// it is a pubsub peer, it is removed from the router and its stream
+  /// closed.
+  void blacklistPeer(PeerId peerId) {
+    _log.fine('PubSub: Blacklisting peer ${peerId.toBase58()}.');
+    blacklist.add(peerId);
+    if (_peers.contains(peerId)) {
+      router.removePeer(peerId).catchError((e) {
+        _log.warning('PubSub: Error removing peer ${peerId.toBase58()}: $e');
+      });
+      _peers.remove(peerId);
+    }
+  }
+
   void _addPeer(PeerId peerId, String protocol) {
     if (_stopped) return; // A greeting that completed after stop().
+    if (blacklist.contains(peerId)) return; // As go-libp2p-pubsub.
     if (!host.network.peers.contains(peerId)) return; // Gone already.
     if (_peers.add(peerId)) {
       router.addPeer(peerId, protocol).catchError((e) {
@@ -490,6 +521,15 @@ class PubSub {
     }
   }
 
+  bool _isBlacklistedAuthor(List<int> from) {
+    if (from.isEmpty || blacklist.length == 0) return false;
+    try {
+      return blacklist.contains(PeerId.fromBytes(Uint8List.fromList(from)));
+    } catch (_) {
+      return false; // Not a peer ID; the signing policy checks reject it.
+    }
+  }
+
   /// The checks of go-libp2p-pubsub's `checkSigningPolicy` and its
   /// self-origin check, for a received message: the reject reason, or null.
   String? _checkSigningPolicy(PubSubMessage message) {
@@ -521,6 +561,15 @@ class PubSub {
   }
 
   Future<(ValidationResult, String?)> _runValidation(PubSubMessage message, bool Function()? markSeen) async {
+    // As go-libp2p-pubsub's shouldPush: messages forwarded by a blacklisted
+    // peer, or written by one, are dropped before anything else.
+    final source = message.receivedFrom;
+    if (source != null && blacklist.contains(source)) {
+      return (ValidationResult.ignore, _rejectBlacklistedPeer);
+    }
+    if (_isBlacklistedAuthor(message.rpcMessage.from)) {
+      return (ValidationResult.ignore, _rejectBlacklistedSource);
+    }
     final policyViolation = _checkSigningPolicy(message);
     if (policyViolation != null) return (ValidationResult.reject, policyViolation);
     if (validateMessageStructure(message,

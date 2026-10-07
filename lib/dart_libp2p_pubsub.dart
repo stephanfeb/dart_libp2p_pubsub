@@ -8,6 +8,7 @@ export 'src/gossipsub/score_params.dart'; // Exporting PeerScoreParams and Topic
 export 'src/gossipsub/score.dart' show PeerScore, PeerScoreSnapshot, TopicScoreStats; // Peer scoring, for inspection
 export 'src/core/router.dart' show Router, AcceptStatus;
 export 'src/core/topic.dart' show Topic;
+export 'src/core/blacklist.dart' show Blacklist;
 export 'src/core/comm.dart' show gossipSubIDv10, gossipSubIDv11, gossipSubIDv12, floodSubID, randomSubID;
 export 'src/util/midgen.dart' show MessageIdFn, defaultMessageIdFn, messageIdFromBytes, messageIdToBytes;
 export 'src/floodsub/floodsub.dart' show FloodSubRouter;
