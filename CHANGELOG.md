@@ -13,9 +13,10 @@ All notable changes to this project will be documented in this file.
 - **Peers did not exchange subscriptions when they connected.** A node sent its subscriptions only when it subscribed, or to a peer that opened a stream to it, so two nodes that subscribed before they connected did not learn of each other's topics and built no mesh. `PubSub` now sends its subscriptions to each peer that connects, as in go-libp2p-pubsub.
 - **The router kept disconnected peers.** Nothing told the router that a peer had disconnected, so the peer stayed in its meshes, fanouts and record of subscriptions. `PubSub` now calls `GossipSubRouter.removePeer` when the last connection to a peer closes, and the heartbeat removes the peers that are no longer connected, because dart_libp2p does not report every disconnect.
 - **Unsubscribing did not tell the mesh.** `GossipSubRouter.leave` removed the mesh locally only, so the remote peers kept the node in their mesh. It now sends `PRUNE` to each mesh peer, with a backoff of `unsubscribeBackoff`.
+- **PRUNE backoffs were ignored.** The router sent `PRUNE` without a backoff from the heartbeat, ignored the backoff in the `PRUNE` messages it received, and could GRAFT a peer again at once. As in go-libp2p-pubsub, every `PRUNE` now carries a backoff (`pruneBackoff`, or `unsubscribeBackoff` on `leave`), the router does not GRAFT a peer on a topic during a backoff in either direction, and a received `PRUNE` without a backoff gives `pruneBackoff`. A peer that GRAFTs during a backoff gets a `PRUNE` and a behaviour penalty, twice if it GRAFTs within `graftFloodThreshold` of the `PRUNE`.
 
 ### Added
-- `GossipSubParams.heartbeatInterval` (default 1 s), `heartbeatInitialDelay` (default 100 ms), `opportunisticGraftTicks` (default 60) and `unsubscribeBackoff` (default 10 s), with go-libp2p-pubsub's defaults.
+- `GossipSubParams.heartbeatInterval` (default 1 s), `heartbeatInitialDelay` (default 100 ms), `opportunisticGraftTicks` (default 60), `unsubscribeBackoff` (default 10 s), `pruneBackoff` (default 1 minute) and `graftFloodThreshold` (default 10 s), with go-libp2p-pubsub's defaults.
 
 ### Changed
 - Opportunistic grafting runs once every `opportunisticGraftTicks` heartbeats (once a minute by default), as in go-libp2p-pubsub. It used to run on every heartbeat, which was also once a minute.

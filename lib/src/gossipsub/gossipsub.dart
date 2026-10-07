@@ -3,6 +3,7 @@ import 'dart:math';
 import 'dart:typed_data'; // Added explicit import for Uint8List
 
 import 'package:dart_libp2p/core/peer/peer_id.dart';
+import 'package:clock/clock.dart';
 import 'package:fixnum/fixnum.dart';
 
 import '../core/pubsub.dart';
@@ -56,6 +57,15 @@ class GossipSubParams {
   /// the pruned peers not to GRAFT us again for this time
   /// (go-libp2p-pubsub's `GossipSubUnsubscribeBackoff`).
   final Duration unsubscribeBackoff;
+  /// Backoff sent in the PRUNE messages of the heartbeat, and applied when a
+  /// PRUNE without a backoff is received: the time during which the pruned
+  /// peer and the router must not GRAFT each other again for the topic
+  /// (go-libp2p-pubsub's `GossipSubPruneBackoff`).
+  final Duration pruneBackoff;
+  /// A peer that GRAFTs during a backoff is penalised; if it does so within
+  /// this time of the PRUNE, it is penalised twice
+  /// (go-libp2p-pubsub's `GossipSubGraftFloodThreshold`).
+  final Duration graftFloodThreshold;
   // etc.
 
   GossipSubParams({
@@ -72,6 +82,8 @@ class GossipSubParams {
     this.heartbeatInitialDelay = const Duration(milliseconds: 100),
     this.opportunisticGraftTicks = 60,
     this.unsubscribeBackoff = const Duration(seconds: 10),
+    this.pruneBackoff = const Duration(minutes: 1),
+    this.graftFloodThreshold = const Duration(seconds: 10),
   }) : assert(opportunisticGraftTicks > 0);
 
   static GossipSubParams get defaultParams => GossipSubParams();
@@ -121,6 +133,11 @@ class GossipSubRouter implements Router {
   Timer? _heartbeatTimer;
   /// Number of heartbeats since [start].
   int _heartbeatTicks = 0;
+
+  /// Peers that must not be GRAFTed until the given time, per topic: the
+  /// backoff after a PRUNE, in either direction.
+  /// topic -> peer -> end of the backoff
+  final Map<String, Map<PeerId, DateTime>> _backoff = {};
   // - Outbound RPC queues per peer
   // - etc.
 
@@ -334,6 +351,21 @@ class GossipSubRouter implements Router {
             ..peerID = peerId.toBytes()
             ..graft = graftTrace
           );
+          final backoffEnd = _backoff[topicId]?[peerId];
+          if (backoffEnd != null && clock.now().isBefore(backoffEnd)) {
+            // As in go-libp2p-pubsub: a GRAFT during the backoff is
+            // penalised, twice if it comes soon after the PRUNE, and
+            // answered with a PRUNE that renews the backoff.
+            _log.fine('GossipSubRouter: GRAFT from $peerId for topic $topicId during backoff; sending PRUNE.');
+            final peerScore = _pubsub?.getPeerScoreObject(peerId);
+            peerScore?.addPenalty(1);
+            final floodCutoff = backoffEnd.add(params.graftFloodThreshold).subtract(params.pruneBackoff);
+            if (clock.now().isBefore(floodCutoff)) {
+              peerScore?.addPenalty(1);
+            }
+            _sendPrune(peerId, topicId, backoff: params.pruneBackoff);
+            continue;
+          }
           mesh.putIfAbsent(topicId, () => <PeerId>{});
           mesh[topicId]!.add(peerId);
           
@@ -355,6 +387,8 @@ class GossipSubRouter implements Router {
             ..prune = pruneTrace
           );
           mesh[topicId]?.remove(peerId);
+          _addBackoff(peerId, topicId,
+              prune_msg.backoff > 0 ? Duration(seconds: prune_msg.backoff.toInt()) : params.pruneBackoff);
           
           // Unprotect peer if not in any other mesh
           if (!_isPeerInAnyMesh(peerId)) {
@@ -642,6 +676,7 @@ class GossipSubRouter implements Router {
       if (peerId == _pubsub?.host.id) continue;
       if (meshPeers.contains(peerId)) continue;
       if (!connected.contains(peerId)) continue;
+      if (_isBackingOff(peerId, topicId)) continue;
       final score = _pubsub?.getPeerScore(peerId) ?? 0.0;
       if (score < params.DScore) continue;
 
@@ -755,16 +790,40 @@ class GossipSubRouter implements Router {
     _sendControl(peerId, controlMsg, controlMeta);
   }
 
+  /// Starts a backoff of [duration] for [peerId] on [topicId], unless one
+  /// that ends later is running.
+  void _addBackoff(PeerId peerId, String topicId, Duration duration) {
+    final end = clock.now().add(duration);
+    final topicBackoff = _backoff.putIfAbsent(topicId, () => {});
+    final current = topicBackoff[peerId];
+    if (current == null || current.isBefore(end)) {
+      topicBackoff[peerId] = end;
+    }
+  }
+
+  bool _isBackingOff(PeerId peerId, String topicId) {
+    final end = _backoff[topicId]?[peerId];
+    return end != null && clock.now().isBefore(end);
+  }
+
+  void _clearExpiredBackoff() {
+    final now = clock.now();
+    _backoff.removeWhere((topic, peers) {
+      peers.removeWhere((peer, end) => !now.isBefore(end));
+      return peers.isEmpty;
+    });
+  }
+
   /// Sends a PRUNE for [topicId] to [peerId], with the given PX peers and
-  /// backoff, traces the RPC and traces the PRUNE.
+  /// backoff, traces the RPC and traces the PRUNE. The router does not GRAFT
+  /// the peer on the topic during the backoff either.
   void _sendPrune(PeerId peerId, String topicId,
-      {List<pb.PeerInfo> pxPeers = const [], Duration? backoff}) {
+      {List<pb.PeerInfo> pxPeers = const [], required Duration backoff}) {
+    _addBackoff(peerId, topicId, backoff);
     final pruneCtrl = pb.ControlPrune()
       ..topicID = topicId
-      ..peers.addAll(pxPeers);
-    if (backoff != null) {
-      pruneCtrl.backoff = Int64(backoff.inSeconds);
-    }
+      ..peers.addAll(pxPeers)
+      ..backoff = Int64(backoff.inSeconds);
     final controlMsg = pb.ControlMessage()..prune.add(pruneCtrl);
     final pruneMeta = trace_pb.TraceEvent_ControlPruneMeta()..topic = topicId;
     for (final pxPeer in pxPeers) {
@@ -814,6 +873,8 @@ class GossipSubRouter implements Router {
       }
     }
 
+    _clearExpiredBackoff();
+
     // Refresh scores for all known peers
     _pubsub?.refreshScores();
 
@@ -835,6 +896,7 @@ class GossipSubRouter implements Router {
       for (final peerId in potentialPeers) {
         if (peerId == _pubsub?.host.id) continue;
         if (currentMeshPeers.contains(peerId)) continue; // Already in mesh
+        if (_isBackingOff(peerId, topicId)) continue;
 
         final score = _pubsub?.getPeerScore(peerId) ?? -double.infinity;
         if (score >= params.opportunisticGraftScoreThreshold) {
@@ -867,6 +929,7 @@ class GossipSubRouter implements Router {
         potentialPeers = potentialPeers.where((peerId) {
           if (peerId == _pubsub?.host.id) return false; // Don't graft self
           if (currentMeshPeers.contains(peerId)) return false; // Already in mesh
+          if (_isBackingOff(peerId, topicId)) return false;
 
           final peerScoreObj = _pubsub?.getPeerScoreObject(peerId);
           if (peerScoreObj == null) {
@@ -905,6 +968,7 @@ class GossipSubRouter implements Router {
           fallbackPeers = fallbackPeers.where((peerId) {
             if (peerId == _pubsub?.host.id) return false;
             if (currentMeshPeers.contains(peerId)) return false;
+            if (_isBackingOff(peerId, topicId)) return false;
             
             // Only exclude peers with very bad scores (e.g., < -10.0)
             final score = _pubsub?.getPeerScore(peerId) ?? 0.0; // Default to 0 instead of -infinity
@@ -968,8 +1032,7 @@ class GossipSubRouter implements Router {
             _log.fine('Heartbeat: Adding ${pxPeers.length} PX peers to PRUNE for ${peerToPrune.toBase58()} on topic $topicId.');
           }
 
-          // TODO: Add backoff logic for PRUNE as per spec (ControlPrune.backoff)
-          _sendPrune(peerToPrune, topicId, pxPeers: pxPeers);
+          _sendPrune(peerToPrune, topicId, pxPeers: pxPeers, backoff: params.pruneBackoff);
           
           // Remove from local mesh
           mesh[topicId]!.remove(peerToPrune);

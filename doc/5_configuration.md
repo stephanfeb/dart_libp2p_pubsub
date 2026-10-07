@@ -56,6 +56,13 @@ When the node subscribes to a topic, the router sends `GRAFT` to up to `D` peers
 
 -   `unsubscribeBackoff` (default: `10 seconds`): The backoff in the `PRUNE` messages sent on unsubscribe. It asks the pruned peers not to `GRAFT` the node again for this time.
 
+### Backoff
+
+Every `PRUNE` carries a backoff: the time during which the two peers must not `GRAFT` each other again for the topic. The router keeps the backoff of the `PRUNE` messages it sends and receives, and does not `GRAFT` a peer during one.
+
+-   `pruneBackoff` (default: `1 minute`): The backoff in the `PRUNE` messages that the heartbeat sends, and the backoff applied when a received `PRUNE` has none.
+-   `graftFloodThreshold` (default: `10 seconds`): A peer that sends `GRAFT` during a backoff gets a `PRUNE` and a behaviour penalty (P6); it gets a second penalty if it sends the `GRAFT` within this time of the `PRUNE`.
+
 ### Fanout Control
 
 The "fanout" is the set of peers you send full messages to for a topic you are **not** subscribed to but have published to. This ensures your message gets into the network.

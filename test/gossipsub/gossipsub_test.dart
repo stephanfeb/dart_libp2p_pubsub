@@ -16,6 +16,7 @@ import 'package:dart_libp2p/core/host/host.dart';
 import 'package:dart_libp2p/core/peer/peer_id.dart';
 import 'package:dart_libp2p/core/network/network.dart'; // Added Network import
 import 'package:dart_libp2p/core/connmgr/conn_manager.dart'; // For ConnManager
+import 'package:fixnum/fixnum.dart';
 import 'package:mockito/mockito.dart';
 import 'package:mockito/annotations.dart';
 import 'package:fake_async/fake_async.dart'; // Import for FakeAsync
@@ -253,6 +254,24 @@ void main() {
         for (final peer in meshPeers) {
           verify(mockConnManager.protect(peer, 'gossipsub-mesh')).called(1);
         }
+      });
+
+      test('rejoining during the unsubscribe backoff does not GRAFT the pruned peers', () async {
+        final peers = [makePeer(45), makePeer(46)];
+        when(mockNetwork.peers).thenReturn(peers);
+        for (final peer in peers) {
+          await subscribeRemote(peer, testTopicName);
+        }
+        await router.join(testTopic);
+        expect(router.mesh[testTopicName], equals(peers.toSet()));
+        await router.leave(testTopic);
+        final sent = captureSentRpcs();
+
+        await router.join(testTopic);
+        await pumpEventQueue();
+
+        expect(router.mesh[testTopicName], isEmpty);
+        expect(sent, isEmpty);
       });
 
       test('removePeer forgets the subscriptions of the peer', () async {
@@ -1659,6 +1678,105 @@ void main() {
           expect(testRouter.mesh[testTopicName], containsAll([mockExistingMeshPeer1, mockExistingMeshPeer2, mockOppGraftPeer1]));
 
           testRouter.stop();
+        });
+      });
+
+      group('PRUNE backoff', () {
+        late GossipSubRouter testRouter;
+        late MockPeerId peer;
+        late List<PeerId> grafted;
+        late List<pb.ControlPrune> prunesSent;
+
+        /// Sets up a router joined to the test topic with [peer] in its mesh.
+        void setUpRouter(FakeAsync async) {
+          router.stop();
+          testRouter = GossipSubRouter(params: GossipSubParams());
+          clearInteractions(mockPubsub);
+          when(mockPubsub.getTopics()).thenReturn([testTopicName]);
+          when(mockPubsub.getPeerScoreObject(any)).thenReturn(null);
+          peer = MockPeerId();
+          when(peer.toBytes()).thenReturn(Uint8List.fromList([0x00, 0x01, 0x70]));
+          when(peer.toBase58()).thenReturn('QmBackoffPeer');
+          when(mockNetwork.peers).thenReturn([peer]);
+          grafted = [];
+          prunesSent = [];
+          when(mockComms.sendRpc(any, any, any)).thenAnswer((inv) async {
+            final rpc = inv.positionalArguments[1] as pb.RPC;
+            if (rpc.control.graft.isNotEmpty) grafted.add(inv.positionalArguments[0] as PeerId);
+            prunesSent.addAll(rpc.control.prune);
+          });
+
+          testRouter.attach(mockPubsub);
+          subscribePeers(async, testRouter, [peer]);
+          testRouter.join(testTopic);
+          async.flushMicrotasks();
+          expect(testRouter.mesh[testTopicName], equals({peer}));
+          grafted.clear();
+        }
+
+        void receive(FakeAsync async, pb.ControlMessage control) {
+          testRouter.handleRpc(peer, pb.RPC()..control = control);
+          async.flushMicrotasks();
+        }
+
+        pb.ControlMessage prune({int? backoffSeconds}) {
+          final p = pb.ControlPrune()..topicID = testTopicName;
+          if (backoffSeconds != null) p.backoff = Int64(backoffSeconds);
+          return pb.ControlMessage()..prune.add(p);
+        }
+
+        /// Checks that the heartbeat GRAFTs [peer] again only after [backoff].
+        void expectNoGraftFor(FakeAsync async, Duration backoff) {
+          testRouter.start();
+          async.elapse(backoff - const Duration(seconds: 1));
+          async.flushMicrotasks();
+          expect(grafted, isEmpty, reason: 'GRAFT during the backoff');
+          async.elapse(const Duration(seconds: 2));
+          async.flushMicrotasks();
+          expect(grafted, equals([peer]), reason: 'GRAFT after the backoff');
+          testRouter.stop();
+        }
+
+        test('a received PRUNE stops GRAFTs to the peer for its backoff', () {
+          fakeAsync((async) {
+            setUpRouter(async);
+            receive(async, prune(backoffSeconds: 30));
+            expect(testRouter.mesh[testTopicName], isEmpty);
+            expectNoGraftFor(async, const Duration(seconds: 30));
+          });
+        });
+
+        test('a received PRUNE without a backoff stops GRAFTs for pruneBackoff', () {
+          fakeAsync((async) {
+            setUpRouter(async);
+            receive(async, prune());
+            expectNoGraftFor(async, testRouter.params.pruneBackoff);
+          });
+        });
+
+        test('a GRAFT during the backoff is answered with PRUNE and penalised', () {
+          fakeAsync((async) {
+            setUpRouter(async);
+            final peerScore = PeerScore(peer, PeerScoreParams.defaultParams);
+            when(mockPubsub.getPeerScoreObject(peer)).thenReturn(peerScore);
+            final graft = pb.ControlMessage()..graft.add(pb.ControlGraft()..topicID = testTopicName);
+            receive(async, prune(backoffSeconds: 60));
+
+            // Within graftFloodThreshold of the PRUNE: penalised twice.
+            async.elapse(const Duration(seconds: 1));
+            receive(async, graft);
+            expect(testRouter.mesh[testTopicName], isEmpty);
+            expect(peerScore.behaviourPenalty, equals(2));
+            expect(prunesSent.single.topicID, equals(testTopicName));
+            expect(prunesSent.single.backoff.toInt(), equals(testRouter.params.pruneBackoff.inSeconds));
+
+            // Later in the (renewed) backoff: penalised once.
+            async.elapse(const Duration(seconds: 20));
+            receive(async, graft);
+            expect(testRouter.mesh[testTopicName], isEmpty);
+            expect(peerScore.behaviourPenalty, equals(3));
+            expect(prunesSent, hasLength(2));
+          });
         });
       });
 
