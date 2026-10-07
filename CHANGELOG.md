@@ -6,6 +6,15 @@ All notable changes to this project will be documented in this file.
 
 A review against go-libp2p-pubsub v0.15.0 found remote denial-of-service holes, a crash, interop bugs and a peer-scoring model that did not work. This release fixes them and aligns the router with Go.
 
+### Upgrading from 1.x
+- **Peer scoring moved to the router and is opt-in.** Pass `scoreParams:` and `scoreThresholds:` (both, together) to `GossipSubRouter`. `PubSub` no longer has `scoreParams`, `getPeerScore`, `getPeerScoreObject`, `peerScores` or `refreshScores`; use `router.score`.
+- **Message IDs changed** to Go's default (`from` bytes followed by `seqno`). Nodes on 1.x and 2.0.0 compute different IDs for the same message, so upgrade a network together.
+- **`GossipSubParams`** uses Go's defaults and validation rules (see Router below).
+- **Peer Exchange** is off by default (`GossipSubRouter(doPX: true)`).
+- **`PubSub.stop()`** no longer disposes the tracer (dispose it yourself), keeps subscriptions, and can be followed by `start()`.
+- **`Router`** gained `protocols` and `acceptFrom`; custom routers must implement them.
+- **`dart_libp2p` >=4.0.1 <5.0.0** is required (was `>=1.0.0`); this release is tested only against 4.0.1.
+
 ### Security
 - **A failed stream open crashed the process.** A peer that connected without speaking pubsub made the per-peer stream lock complete with an error nobody listened to, which terminated the isolate. It no longer does.
 - **Inbound RPC size was unbounded.** A peer could announce a huge frame and make the node buffer it. Frames above `maxMessageSize` (default 1 MiB, `PubSub(maxMessageSize:)`) now reset the stream before being read. Outgoing RPCs are split to fit (as Go's `RPC.split`), and an oversized message is dropped.
@@ -17,6 +26,7 @@ A review against go-libp2p-pubsub v0.15.0 found remote denial-of-service holes, 
 - **The outgoing RPC queue was unbounded** and could keep failed RPCs forever. It now holds 32 RPCs per peer with a priority lane, drops RPCs when full (traced as DROP_RPC; dropped GRAFT/PRUNEs are retried with the next RPC), and drops an RPC that fails to send.
 - **Concurrent writes could interleave frames** on a stream; writes are now serialised per stream.
 - A message that claims to come from this node but arrives from a peer is rejected.
+- **The blacklist is enforced**, as go-libp2p-pubsub's `WithBlacklist` and `BlacklistPeer`. `PubSub(blacklist:)` takes a `Blacklist` (now exported) and `PubSub.blacklistPeer` adds a peer, removing it from the router if connected. A blacklisted peer is not added or greeted, its RPCs are ignored, and messages it forwards or wrote are dropped before validation (traced as `blacklisted peer` / `blacklisted source`) without being marked seen. Before, `Blacklist` was not used by anything.
 
 ### Interop
 - **Message IDs now match Go.** The default ID is the bytes of `from` followed by `seqno` (Go's `DefaultMsgIdFn`), and `messageIDs` in IHAVE/IWANT/IDONTWANT are `bytes` (wire-compatible with Go's `string`). IDs are Dart strings with one byte per code unit (`messageIdFromBytes`, `messageIdToBytes`). `PubSub(messageIdFn:)` sets a custom ID function.
@@ -31,24 +41,24 @@ A review against go-libp2p-pubsub v0.15.0 found remote denial-of-service holes, 
 - Scoring moved from `PubSub` to the router and is opt-in, as in Go: `GossipSubRouter(scoreParams:, scoreThresholds:)`, both required together. `PubSub` no longer has `scoreParams`, `getPeerScore`, `getPeerScoreObject`, `peerScores` or `refreshScores`; use `router.score`.
 - `PeerScoreParams`, `TopicScoreParams` and `PeerScoreThresholds` have Go's fields and `validate()` rules (`topics`, `topicScoreCap`, `appSpecificWeight`, `ipColocationFactorWeight`, `behaviourPenaltyThreshold`, `gossipThreshold`, `publishThreshold`, `graylistThreshold`, `acceptPXThreshold`, `opportunisticGraftThreshold`, ...). `scoreParameterDecay` is Go's `ScoreParameterDecay`.
 
-### Router (breaking)
-- The heartbeat follows Go: prunes mesh peers with a negative score, keeps `DOut` outbound peers, keeps the `DScore` best peers when pruning, grafts opportunistically only when the mesh median is below `opportunisticGraftThreshold`, filters fanout by `publishThreshold`, and keeps backoffs two heartbeats past their end.
-- GRAFTs from peers with a negative score, or from inbound peers when the mesh has `DHigh` peers, are refused with a PRUNE.
-- Flood publish is on by default (`floodPublish`), and forwarded messages skip their author.
-- Peer Exchange is off by default (`GossipSubRouter(doPX: true)`).
+### Peer Exchange and lifecycle
 - **The router now connects to the peers offered in a received PRUNE (Peer Exchange)**, as Go's `pxConnect`: when the sender's score is at least `acceptPXThreshold`, up to `prunePeers` of them, through `connectors` (8) concurrent attempts with at most `maxPendingConnections` (128) queued and a `connectionTimeout` (30 s). A signed peer record must be about the peer and signed by its key; its addresses are stored in the certified address book. Our PX now carries the signed records the address book has (dart_libp2p 4.0.1's identify does not store remote records, so these are mostly records learned from PX).
 - **`stop()` then `start()` works**, and a peer that restarts its pubsub is picked up again:
   - `PubSub.stop()` removes all peers from the router and closes all pubsub streams; the router forgets its meshes, fanouts, backoffs and queues. `start()` registers the protocol handlers again, rejoins the subscribed topics and greets the connected peers again. Subscriptions and validators are kept across a restart.
   - `stop()` no longer disposes the tracer, which it could not reopen (as in Go, the owner of the tracer closes it).
   - As Go's `handlePeerDead`, a peer that ends our stream to it (it stopped its pubsub) is removed from the router; if it is still connected, it is greeted again with Go's dead-peer backoff (at most 4 attempts in 10 minutes), so it is added back when it restarts.
+- **`PubSub.stop()` could hang forever.** Closing a stream waits for its FIN to be sent behind any data queued for a peer, and `PubSubProtocol.close()` waited for every stream with no limit, so one slow or stalled peer could block `stop()` indefinitely (reported on 1.5.0 after a burst of 100 messages). Each stream close is now bounded by `streamCloseTimeout` (default 2 s) and the stream is reset when it expires. This applies to `close()`, `closePeerStream` and the stream cleanup in `sendRpc`, whose wait stalled that peer's send queue. `close()` now also closes inbound streams, ending their read loops.
+
+### Router (breaking)
+- The heartbeat follows Go: prunes mesh peers with a negative score, keeps `DOut` outbound peers, keeps the `DScore` best peers when pruning, grafts opportunistically only when the mesh median is below `opportunisticGraftThreshold`, filters fanout by `publishThreshold`, and keeps backoffs two heartbeats past their end.
+- GRAFTs from peers with a negative score, or from inbound peers when the mesh has `DHigh` peers, are refused with a PRUNE.
+- Flood publish is on by default (`floodPublish`), and forwarded messages skip their author.
+- Peer Exchange is off by default (`GossipSubRouter(doPX: true)`).
 - `GossipSubParams`: `DScore` is now a peer count (default 4), `DLow` defaults to 5, new `DOut`, `gossipFactor`, `historyLength`, `historyGossip`, `maxIHaveLength`, `maxIHaveMessages`, `iwantFollowupTime`, `opportunisticGraftPeers`, IDONTWANT parameters; `opportunisticGraftScoreThreshold` was removed; `prunePeers` defaults to 16. `validate()` uses Go's rules.
 - `Router` has `protocols` and `acceptFrom`; `PubSub` now calls `Router.addPeer` for each pubsub peer, sends its hello to every connected peer (including peers connected before `start()`), and announces subscription changes to peers being greeted.
 - Validation no longer blocks reading a peer's stream.
 
-- **The blacklist is enforced**, as go-libp2p-pubsub's `WithBlacklist` and `BlacklistPeer`. `PubSub(blacklist:)` takes a `Blacklist` (now exported) and `PubSub.blacklistPeer` adds a peer, removing it from the router if connected. A blacklisted peer is not added or greeted, its RPCs are ignored, and messages it forwards or wrote are dropped before validation (traced as `blacklisted peer` / `blacklisted source`) without being marked seen. Before, `Blacklist` was not used by anything.
-
 ### Also
-- `dart_libp2p` must be `>=4.0.1 <5.0.0` (was `>=1.0.0`); this release is tested only against 4.0.1.
 - The public library exports the routers, `Router`, `Topic`, the protocol IDs, the message ID helpers and the tracers.
 - README links point to `doc/`.
 
@@ -62,7 +72,6 @@ A review against go-libp2p-pubsub v0.15.0 found remote denial-of-service holes, 
 ## 1.6.0 - 2026-10-08
 
 ### Fixed
-- **`PubSub.stop()` could hang forever.** Closing a stream waits for its FIN to be sent behind any data queued for a peer, and `PubSubProtocol.close()` waited for every stream with no limit, so one slow or stalled peer could block `stop()` indefinitely (reported on 1.5.0 after a burst of 100 messages). Each stream close is now bounded by `streamCloseTimeout` (default 2 s) and the stream is reset when it expires. This applies to `close()`, `closePeerStream` and the stream cleanup in `sendRpc`, whose wait stalled that peer's send queue. `close()` now also closes inbound streams, ending their read loops.
 - **The heartbeat ran once a minute.** The router ran its heartbeat every `fanoutTTL` (1 minute by default), so a mesh below `DLow` waited up to a minute for new peers. The heartbeat now runs every `GossipSubParams.heartbeatInterval` (1 s), the first one `heartbeatInitialDelay` (100 ms) after `start()`, as in go-libp2p-pubsub.
 - **Subscribing and unsubscribing did not join or leave the topic.** `PubSub.subscribe` and `unsubscribe` never called `Router.join` or `Router.leave`, and peers were never told of an unsubscription. `GossipSubRouter.join` only created an empty mesh, which the next heartbeat filled, and `leave` removed the mesh locally only, so the remote peers kept the node in their mesh. As in go-libp2p-pubsub, the first subscription to a topic now joins it: the router sends `GRAFT` to up to `D` connected peers with a score of at least `DScore`, first the topic's fanout peers, then other peers subscribed to the topic, and removes the topic's fanout. Cancelling the last subscription announces the unsubscription to the connected peers and leaves the topic: the router sends `PRUNE` to each mesh peer, with a backoff of `unsubscribeBackoff`.
 - **Peers did not exchange subscriptions when they connected.** A node sent its subscriptions only when it subscribed, or to a peer that opened a stream to it, so two nodes that subscribed before they connected did not learn of each other's topics and built no mesh. `PubSub` now sends its subscriptions to each peer that connects, as in go-libp2p-pubsub.
