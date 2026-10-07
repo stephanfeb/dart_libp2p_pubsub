@@ -234,11 +234,10 @@ class GossipSubRouter implements Router {
         final topicId = subOpt.topicid;
         if (subOpt.subscribe) {
           _log.fine('GossipSubRouter: Received SUBSCRIBE from $peerId for topic $topicId');
-          // Track peer's subscription and add to mesh if we also subscribe to this topic
+          // Track the peer's subscription. As in go-libp2p-pubsub, the peer
+          // joins the mesh only through GRAFT: the heartbeat GRAFTs it if
+          // the mesh is below DLow.
           _peerTopics.putIfAbsent(peerId, () => <String>{}).add(topicId);
-          if (mesh.containsKey(topicId)) {
-            mesh[topicId]!.add(peerId);
-          }
         } else {
           _log.fine('GossipSubRouter: Received UNSUBSCRIBE from $peerId for topic $topicId');
           _peerTopics[peerId]?.remove(topicId);

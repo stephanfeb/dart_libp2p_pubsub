@@ -1250,8 +1250,7 @@ void main() {
       late Topic testTopic;
 
       /// Makes [peers] known to [r] as subscribed to [topic], as if each had
-      /// sent a SUBSCRIBE. A SUBSCRIBE for a topic in the mesh adds the peer
-      /// to the mesh, so the mesh of [topic] is then set to [mesh] if given.
+      /// sent a SUBSCRIBE, then sets the mesh of [topic] to [mesh] if given.
       void subscribePeers(FakeAsync async, GossipSubRouter r, List<PeerId> peers,
           {String topic = testTopicName, Set<PeerId>? mesh}) {
         for (final peer in peers) {
@@ -1643,6 +1642,45 @@ void main() {
           // Verify mesh state
           expect(testRouter.mesh[testTopicName]!.length, equals(3)); // 2 existing + 1 opp graft
           expect(testRouter.mesh[testTopicName], containsAll([mockExistingMeshPeer1, mockExistingMeshPeer2, mockOppGraftPeer1]));
+
+          testRouter.stop();
+        });
+      });
+
+      test('SUBSCRIBE does not add the peer to the mesh; the next heartbeat GRAFTs it', () {
+        fakeAsync((async) {
+          router.stop();
+          final testRouter = GossipSubRouter(params: GossipSubParams());
+          clearInteractions(mockComms);
+          when(mockPubsub.getTopics()).thenReturn([testTopicName]);
+          when(mockPubsub.getPeerScoreObject(any)).thenReturn(null);
+
+          final grafted = <PeerId>[];
+          when(mockComms.sendRpc(any, any, any)).thenAnswer((inv) async {
+            final rpc = inv.positionalArguments[1] as pb.RPC;
+            if (rpc.control.graft.any((g) => g.topicID == testTopicName)) {
+              grafted.add(inv.positionalArguments[0] as PeerId);
+            }
+          });
+
+          testRouter.attach(mockPubsub);
+          testRouter.join(testTopic);
+          testRouter.start();
+
+          final newPeer = MockPeerId();
+          when(newPeer.toBytes()).thenReturn(Uint8List.fromList([0x00, 0x01, 0x50]));
+          when(newPeer.toBase58()).thenReturn('QmNewPeer');
+          when(mockNetwork.peers).thenReturn([newPeer]);
+          subscribePeers(async, testRouter, [newPeer]);
+
+          expect(testRouter.mesh[testTopicName], isEmpty);
+          expect(grafted, isEmpty);
+
+          async.elapse(testRouter.params.heartbeatInitialDelay);
+          async.flushMicrotasks();
+
+          expect(testRouter.mesh[testTopicName], equals({newPeer}));
+          expect(grafted, equals([newPeer]));
 
           testRouter.stop();
         });
