@@ -8,6 +8,7 @@ import 'package:dart_libp2p/core/peerstore.dart';
 import 'package:dart_libp2p/core/protocol/switch.dart';
 import 'package:dart_libp2p/p2p/protocol/holepunch/holepunch_service.dart';
 import 'package:test/test.dart';
+import 'package:fake_async/fake_async.dart';
 import 'dart:async';
 import 'dart:typed_data';
 
@@ -37,10 +38,13 @@ import '../../lib/src/gossipsub/gossipsub.dart';
 
 // --- Mock Implementations ---
 
-// Minimal Network mock that returns no connected peers
+// Minimal Network mock; [MockNetwork.connectedPeers] are the connected peers
 class MockNetwork implements Network {
+  /// The peers that [peers] reports as connected.
+  List<PeerId> connectedPeers = [];
+
   @override
-  List<PeerId> get peers => [];
+  List<PeerId> get peers => connectedPeers;
 
   @override
   List<Conn> get conns => [];
@@ -278,7 +282,8 @@ class MockHost implements Host {
   ProtocolSwitch get mux => throw UnimplementedError();
 
   @override
-  Network get network => MockNetwork();
+  Network get network => _network;
+  final MockNetwork _network = MockNetwork();
 
   @override
   // TODO: implement peerStore
@@ -407,6 +412,37 @@ void main() {
 
       await sub2.cancel();
       expect(router.joinedTopics, isEmpty);
+    });
+
+    test('the score of a disconnected peer is kept for retainScore, then deleted', () {
+      fakeAsync((async) {
+        final network = mockHost.network as MockNetwork;
+        final retain = pubsub.scoreParams.retainScore;
+        final peer = PeerId.fromBytes(Uint8List.fromList([0x00, 0x01, 0x01]));
+        network.connectedPeers = [peer];
+        final score = pubsub.getPeerScoreObject(peer);
+        pubsub.refreshScores();
+
+        // Disconnected for almost retainScore, then reconnected: kept.
+        network.connectedPeers = [];
+        pubsub.refreshScores();
+        async.elapse(retain - const Duration(seconds: 1));
+        pubsub.refreshScores();
+        expect(pubsub.peerScores[peer], same(score));
+        network.connectedPeers = [peer];
+        pubsub.refreshScores();
+
+        // Disconnected again: the time starts again.
+        network.connectedPeers = [];
+        pubsub.refreshScores();
+        async.elapse(retain - const Duration(seconds: 1));
+        pubsub.refreshScores();
+        expect(pubsub.peerScores[peer], same(score));
+
+        async.elapse(const Duration(seconds: 1));
+        pubsub.refreshScores();
+        expect(pubsub.peerScores, isNot(contains(peer)));
+      });
     });
 
     // TODO: Add tests for message validation registration and invocation.

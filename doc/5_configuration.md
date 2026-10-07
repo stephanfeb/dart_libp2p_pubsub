@@ -97,6 +97,7 @@ Peer scoring is always on: each `PubSub` uses `PeerScoreParams.defaultParams` un
 
 -   `invalidMessageDeliveriesWeight` (`TopicScoreParams`, default: `-1.0`): 1 rejected message gives -1, 2 give -4, 4 give -16, 10 give -100 (the default `graylistThreshold`). A peer with a negative score is not chosen for the mesh, fanout or gossip in normal selection. `0` turns the penalty off.
 -   `invalidMessageDeliveriesDecay` (`TopicScoreParams`, default: `0.9987`): With the default `decayInterval` of 1 second, the counter for one message decays to zero in about 1 hour (as `ScoreParameterDecay(time.Hour)` in go-libp2p-pubsub). If you change `decayInterval`, change this too.
+-   `retainScore` (`PeerScoreParams`, default: `1 hour`): How long the score of a disconnected peer is kept, so that the peer cannot clear its penalties by reconnecting. The score is deleted when the peer has been disconnected for this time. Keep it at least as long as your penalties take to decay.
 
 ```dart
 final scoreParams = PeerScoreParams(

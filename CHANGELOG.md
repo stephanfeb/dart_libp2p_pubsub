@@ -18,11 +18,12 @@ All notable changes to this project will be documented in this file.
 - **PRUNE backoffs were ignored.** The router sent `PRUNE` without a backoff from the heartbeat, ignored the backoff in the `PRUNE` messages it received, and could GRAFT a peer again at once. As in go-libp2p-pubsub, every `PRUNE` now carries a backoff (`pruneBackoff`, or `unsubscribeBackoff` on `leave`), the router does not GRAFT a peer on a topic during a backoff in either direction, and a received `PRUNE` without a backoff gives `pruneBackoff`. A peer that GRAFTs during a backoff gets a `PRUNE` and a behaviour penalty, twice if it GRAFTs within `graftFloodThreshold` of the `PRUNE`.
 
 ### Added
+- `PeerScoreParams.retainScore` (default 1 hour): how long the score of a disconnected peer is kept.
 - `GossipSubParams.heartbeatInterval` (default 1 s), `heartbeatInitialDelay` (default 100 ms), `opportunisticGraftTicks` (default 60), `unsubscribeBackoff` (default 10 s), `pruneBackoff` (default 1 minute) and `graftFloodThreshold` (default 10 s), with go-libp2p-pubsub's defaults.
 
 ### Changed
 - Opportunistic grafting runs once every `opportunisticGraftTicks` heartbeats (once a minute by default), as in go-libp2p-pubsub. It used to run on every heartbeat, which was also once a minute.
-- `PubSub.removePeer` no longer deletes the peer's score, so a peer cannot clear its penalties by reconnecting.
+- `PubSub.removePeer` no longer deletes the peer's score, so a peer cannot clear its penalties by reconnecting. As in go-libp2p-pubsub, the score of a disconnected peer is now kept for `PeerScoreParams.retainScore` (default 1 hour), then deleted; before, scores were never deleted.
 - Peers that the router grafts are protected in the connection manager (tag `gossipsub-mesh`), as peers that graft the node already were.
 
 ## 1.5.0 - 2026-10-08

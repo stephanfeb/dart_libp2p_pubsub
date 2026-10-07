@@ -141,6 +141,12 @@ class PeerScoreParams {
   /// Cap for behavioral penalties (P6).
   final double behaviourPenaltyCap;
 
+  /// How long the score of a disconnected peer is kept, so that the peer
+  /// cannot clear its penalties by reconnecting. The score is deleted when
+  /// the peer has been disconnected for this time
+  /// (go-libp2p-pubsub's `RetainScore`).
+  final Duration retainScore;
+
 
   const PeerScoreParams({
     TopicScoreParams? defaultTopicParams,
@@ -161,6 +167,7 @@ class PeerScoreParams {
     this.behaviourPenaltyWeight = -10.0,
     this.behaviourPenaltyDecay = 0.99,
     this.behaviourPenaltyCap = -100.0,
+    this.retainScore = const Duration(hours: 1),
   }) : defaultTopicParams = defaultTopicParams ?? const TopicScoreParams();
 
   static PeerScoreParams get defaultParams => PeerScoreParams(defaultTopicParams: TopicScoreParams.defaultTopicParams);

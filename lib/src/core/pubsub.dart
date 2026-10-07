@@ -24,6 +24,7 @@ import '../gossipsub/score.dart'; // For PeerScore
 import '../gossipsub/score_params.dart'; // For PeerScoreParams
 // Ensure MessageIdFunction is available from midgen
 import '../util/midgen.dart';
+import 'package:clock/clock.dart';
 import 'package:logging/logging.dart';
 
 export 'validation.dart' show ValidationResult;
@@ -122,6 +123,9 @@ class PubSub {
 
   /// Manages scores for known peers.
   final Map<PeerId, PeerScore> peerScores = {};
+
+  /// When the score of each disconnected peer is deleted.
+  final Map<PeerId, DateTime> _scoreExpiry = {};
 
   PubSubProtocol get comms => _comms;
 
@@ -607,8 +611,8 @@ class PubSub {
 
   /// Called by the router when a peer disconnects.
   ///
-  /// The peer's score is kept, so a peer cannot clear its penalties by
-  /// reconnecting.
+  /// The peer's score is kept for [PeerScoreParams.retainScore], so a peer
+  /// cannot clear its penalties by reconnecting.
   void removePeer(PeerId peerId) {
     // Router also calls its own removePeer. This is for PubSub's internal cleanup.
     // Close the persistent stream to this peer
@@ -641,6 +645,22 @@ class PubSub {
 
   /// Periodically called (e.g., by GossipSubRouter's heartbeat) to refresh scores.
   void refreshScores() {
+    // As in go-libp2p-pubsub, the score of a disconnected peer is kept for
+    // PeerScoreParams.retainScore, then deleted. The connected peers are read
+    // from the network, which reports them reliably, unlike disconnects.
+    final now = clock.now();
+    final connected = host.network.peers.toSet();
+    peerScores.removeWhere((peerId, _) {
+      if (connected.contains(peerId)) {
+        _scoreExpiry.remove(peerId);
+        return false;
+      }
+      final expiry = _scoreExpiry.putIfAbsent(peerId, () => now.add(scoreParams.retainScore));
+      if (now.isBefore(expiry)) return false;
+      _scoreExpiry.remove(peerId);
+      _log.fine('PubSub: Deleted the score of ${peerId.toBase58()}, disconnected for ${scoreParams.retainScore}');
+      return true;
+    });
     for (final peerScore in peerScores.values) {
       peerScore.refreshScore();
     }
