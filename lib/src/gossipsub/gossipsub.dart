@@ -740,6 +740,13 @@ class GossipSubRouter implements Router {
       .where((entry) => entry.value.contains(topicId))
       .map((entry) => entry.key);
 
+  /// The connected peers known to be subscribed to [topicId]: the
+  /// candidates to GRAFT for the topic.
+  List<PeerId> _connectedTopicPeers(String topicId) {
+    final connected = _pubsub?.host.network.peers.toSet() ?? <PeerId>{};
+    return _topicPeers(topicId).where(connected.contains).toList();
+  }
+
   /// Sends a GRAFT for [topicId] to [peerId] and traces the RPC.
   void _sendGraft(PeerId peerId, String topicId) {
     final controlMsg = pb.ControlMessage()..graft.add(pb.ControlGraft()..topicID = topicId);
@@ -807,7 +814,7 @@ class GossipSubRouter implements Router {
         return; // Mesh is full or overfull, no room for opportunistic grafts
       }
 
-      final potentialPeers = _pubsub?.host.network.peers.toList() ?? [];
+      final potentialPeers = _connectedTopicPeers(topicId);
       potentialPeers.shuffle(); // Randomize to give different peers a chance over time
 
       for (final peerId in potentialPeers) {
@@ -838,8 +845,8 @@ class GossipSubRouter implements Router {
 
         _log.fine('Heartbeat: Topic $topicId mesh too small ($currentMeshSize < ${params.DLow}). Need $needed more peers. Attempting to find and GRAFT.');
 
-        // Get potential peers: all connected peers.
-        var potentialPeers = _pubsub?.host.network.peers.toList() ?? [];
+        // Get potential peers: the connected peers subscribed to the topic.
+        var potentialPeers = _connectedTopicPeers(topicId);
         
         // Filter out self, peers already in mesh, using permissive scoring for new peers.
         potentialPeers = potentialPeers.where((peerId) {
@@ -879,7 +886,7 @@ class GossipSubRouter implements Router {
           _log.fine('Heartbeat: No suitable peers found with normal criteria for topic $topicId.');
           
           // Fallback: Try with even more permissive criteria
-          var fallbackPeers = _pubsub?.host.network.peers.toList() ?? [];
+          var fallbackPeers = _connectedTopicPeers(topicId);
           fallbackPeers = fallbackPeers.where((peerId) {
             if (peerId == _pubsub?.host.id) return false;
             if (currentMeshPeers.contains(peerId)) return false;

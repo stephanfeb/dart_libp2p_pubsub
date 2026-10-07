@@ -1210,6 +1210,20 @@ void main() {
       const testTopicName = 'adv-mesh-topic';
       late Topic testTopic;
 
+      /// Makes [peers] known to [r] as subscribed to the test topic, as if each
+      /// had sent a SUBSCRIBE. A SUBSCRIBE for a topic in the mesh adds the
+      /// peer to the mesh, so the mesh is then set to [mesh].
+      void subscribePeers(FakeAsync async, GossipSubRouter r, List<PeerId> peers, Set<PeerId> mesh) {
+        for (final peer in peers) {
+          r.handleRpc(peer, pb.RPC()
+            ..subscriptions.add(pb.RPC_SubOpts()
+              ..subscribe = true
+              ..topicid = testTopicName));
+        }
+        async.flushMicrotasks();
+        r.mesh[testTopicName] = mesh;
+      }
+
       setUp(() {
         testTopic = Topic(testTopicName);
         // Ensure the router is joined to the topic for these tests
@@ -1316,6 +1330,13 @@ void main() {
           when(mockPubsub.getPeerScoreObject(mockCandidatePeer6)).thenReturn(peerScore6);
 
 
+          // Connected, good score, but not subscribed to the topic.
+          final mockUnsubscribedPeer = MockPeerId();
+          when(mockUnsubscribedPeer.toBytes()).thenReturn(Uint8List.fromList([70,1,7]));
+          when(mockUnsubscribedPeer.toBase58()).thenReturn('QmUnsubscribed');
+          when(mockPubsub.getPeerScoreObject(mockUnsubscribedPeer))
+              .thenReturn(PeerScore(mockUnsubscribedPeer, scoreParams)..score = 10.0);
+
           // Simulate these peers being available in the wider network
           when(mockNetwork.peers).thenReturn([
             mockLocalPeerId, // Self
@@ -1324,8 +1345,17 @@ void main() {
             mockCandidatePeer3, // Bad score peer
             mockCandidatePeer4,
             mockCandidatePeer5,
-            mockCandidatePeer6
+            mockCandidatePeer6,
+            mockUnsubscribedPeer,
           ]);
+          subscribePeers(async, testRouter, [
+            mockCandidatePeer1,
+            mockCandidatePeer2,
+            mockCandidatePeer3,
+            mockCandidatePeer4,
+            mockCandidatePeer5,
+            mockCandidatePeer6,
+          ], {});
 
           // Capture GRAFT RPCs
           final List<PeerId> graftedPeers = [];
@@ -1346,6 +1376,7 @@ void main() {
             reason: "Should attempt to GRAFT up to D peers with good scores. Found: ${graftedPeers.map((p) => p.toBase58()).toList()}");
           expect(graftedPeers, containsAll([mockCandidatePeer1, mockCandidatePeer2, mockCandidatePeer4, mockCandidatePeer5, mockCandidatePeer6]));
           expect(graftedPeers, isNot(contains(mockCandidatePeer3))); // Should not graft bad score peer
+          expect(graftedPeers, isNot(contains(mockUnsubscribedPeer))); // Not subscribed to the topic
           
           // Verify mesh state (optimistic addition)
           expect(testRouter.mesh[testTopicName]!.length, equals(5));
@@ -1531,14 +1562,23 @@ void main() {
           when(mockPubsub.getPeerScore(mockOppGraftPeer3)).thenReturn(7.0);
 
 
+          final mockUnsubscribedPeer = MockPeerId(); // Good score, not subscribed to the topic
+          when(mockUnsubscribedPeer.toBytes()).thenReturn(Uint8List.fromList([91,1,3]));
+          when(mockUnsubscribedPeer.toBase58()).thenReturn('QmUnsubscribed');
+          when(mockPubsub.getPeerScore(mockUnsubscribedPeer)).thenReturn(9.0);
+
           when(mockNetwork.peers).thenReturn([
             mockLocalPeerId, 
             mockExistingMeshPeer1, 
             mockExistingMeshPeer2,
             mockOppGraftPeer1,
             mockOppGraftPeer2,
+            mockUnsubscribedPeer,
             // mockOppGraftPeer3 is essentially mockExistingMeshPeer1
           ]);
+          subscribePeers(async, testRouter,
+              [mockExistingMeshPeer1, mockExistingMeshPeer2, mockOppGraftPeer1, mockOppGraftPeer2],
+              {mockExistingMeshPeer1, mockExistingMeshPeer2});
 
           final List<PeerId> opportunisticallyGraftedPeers = [];
           when(mockComms.sendRpc(captureAny, argThat(isA<pb.RPC>()
