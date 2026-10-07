@@ -97,6 +97,10 @@ class PubSubProtocol {
   /// protocol.
   void Function(PeerId peerId, String protocol)? onNewInboundPeer;
 
+  /// Called when a peer ends our stream to it, as go-libp2p-pubsub's
+  /// `handlePeerDead`: the peer stopped its pubsub, or the stream failed.
+  void Function(PeerId peerId)? onPeerDead;
+
   /// Map of persistent outbound streams per peer
   final Map<PeerId, _PersistentStream> _outboundStreams = {};
 
@@ -132,10 +136,17 @@ class PubSubProtocol {
       {this.maxMessageSize = defaultMaxMessageSize,
       this.protocols = const [gossipSubIDv11],
       this.streamCloseTimeout = defaultStreamCloseTimeout}) {
+    start();
+  }
+
+  /// Registers the stream handlers of [protocols]. The constructor calls it;
+  /// call it again to reopen after [close].
+  void start() {
+    _isClosing = false;
     for (final protocol in protocols) {
       _host.setStreamHandler(protocol, _handleNewStreamData);
     }
-    _log.fine('PubSubProtocol initialized with persistent streams for $protocols.');
+    _log.fine('PubSubProtocol started with persistent streams for $protocols.');
   }
 
   /// The protocol negotiated with [peerId] on our stream to it, if open.
@@ -278,6 +289,11 @@ class PubSubProtocol {
     try {
       _log.fine('Creating new persistent stream to $peerId on $protocols');
       final stream = await _host.newStream(peerId, protocols, p2p_context.Context());
+      if (_isClosing) {
+        // Closed while the stream was opening: close() did not see it.
+        unawaited(closeStream(stream, streamCloseTimeout));
+        throw StateError('PubSubProtocol closed while opening a stream to $peerId');
+      }
       _negotiated[peerId] = stream.protocol();
 
       final persistentStream = _PersistentStream(
@@ -286,6 +302,7 @@ class PubSubProtocol {
       );
 
       _outboundStreams[peerId] = persistentStream;
+      _watchOutbound(persistentStream);
       newLock.complete(persistentStream);
       _log.fine('Created persistent stream to $peerId (stream id: ${stream.id()})');
 
@@ -308,6 +325,28 @@ class PubSubProtocol {
     } finally {
       _streamCreationLocks.remove(peerId);
     }
+  }
+
+  /// Waits for the peer to end our stream to it, as go-libp2p-pubsub's
+  /// `handlePeerDead`: the peer never writes on it, so a read returns only
+  /// when the stream ends (or on unexpected data). The stream is then reset
+  /// and [onPeerDead] called, unless we closed or replaced the stream.
+  void _watchOutbound(_PersistentStream persistent) {
+    final peerId = persistent.peerId;
+    Future.sync(persistent.stream.read).then((data) {
+      if (data.isNotEmpty) _log.fine('Unexpected data from $peerId on our stream to it');
+    }, onError: (Object e) {
+      _log.fine('Our stream to $peerId failed: $e');
+    }).whenComplete(() {
+      if (!identical(_outboundStreams[peerId], persistent)) return; // Closed by us.
+      _outboundStreams.remove(peerId);
+      _negotiated.remove(peerId);
+      persistent._isClosed = true;
+      persistent.stream.reset().catchError((Object e) {
+        _log.fine('Error resetting the stream to $peerId: $e');
+      });
+      if (!_isClosing) onPeerDead?.call(peerId);
+    });
   }
 
   /// Sends an RPC message to a specific peer using a persistent stream.
@@ -412,7 +451,8 @@ class PubSubProtocol {
     }
   }
 
-  /// Closes the protocol handler and cleans up resources.
+  /// Unregisters the stream handlers and closes all streams. [start]
+  /// reopens.
   Future<void> close() async {
     _isClosing = true;
 

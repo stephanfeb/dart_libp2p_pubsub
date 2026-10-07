@@ -133,11 +133,13 @@ When you no longer need to receive messages on a topic, you can unsubscribe.
 await nodeA.pubsub.unsubscribe(topicId);
 ```
 
-To shut down the entire pubsub service, call `stop()`. This will stop the router and all associated background tasks.
+To shut down the entire pubsub service, call `stop()`. This stops the router, removes all peers from it and closes all pubsub streams, waiting at most 2 seconds for each.
 
 ```dart
 await pubsub.stop();
 ```
+
+`stop()` keeps your subscriptions and validators. Calling `start()` again rejoins the subscribed topics, greets the connected peers again, and the existing subscriptions receive messages again. To end a subscription's stream, cancel the subscription. `stop()` flushes the tracer but does not dispose it: dispose it yourself after the last `stop()`.
 
 ---
 

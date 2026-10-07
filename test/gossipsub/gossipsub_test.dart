@@ -19,6 +19,16 @@ import 'package:dart_libp2p/core/connmgr/conn_manager.dart'; // For ConnManager
 import 'package:dart_libp2p/core/multiaddr.dart';
 import 'package:dart_libp2p/core/network/common.dart' show Direction;
 import 'package:dart_libp2p/core/network/conn.dart';
+import 'package:dart_libp2p/core/certified_addr_book.dart';
+import 'package:dart_libp2p/core/crypto/ed25519.dart' show generateEd25519KeyPair;
+import 'package:dart_libp2p/core/crypto/keys.dart' show KeyPair;
+import 'package:dart_libp2p/core/network/network.dart' show Connectedness;
+import 'package:dart_libp2p/core/peer/addr_info.dart';
+import 'package:dart_libp2p/core/peer/record.dart';
+import 'package:dart_libp2p/core/peerstore.dart';
+import 'package:dart_libp2p/core/record/envelope.dart';
+import 'package:dart_libp2p/core/record/record_registry.dart';
+import 'package:dart_libp2p/core/peer/pb/peer_record.pb.dart' as record_pb;
 import 'package:fixnum/fixnum.dart';
 import 'package:mockito/mockito.dart';
 import 'package:mockito/annotations.dart';
@@ -52,6 +62,31 @@ class _FakeConnStats extends ConnStats {
 
 /// Score thresholds for the tests that enable scoring; a slightly negative
 /// score is neither graylisted nor below the publish threshold.
+/// An address book that keeps signed peer records, like dart_libp2p's.
+class _FakeAddrBook extends Fake implements AddrBook, CertifiedAddrBook {
+  final Map<PeerId, Envelope> records = {};
+  final Map<PeerId, List<MultiAddr>> addresses = {};
+
+  @override
+  Future<bool> consumePeerRecord(Envelope s, Duration ttl) async {
+    final record = PeerRecord.fromProtobuf(await s.record());
+    records[record.peerId] = s;
+    addresses[record.peerId] = record.addrs;
+    return true;
+  }
+
+  @override
+  Future<Envelope?> getPeerRecord(PeerId p) async => records[p];
+
+  @override
+  Future<List<MultiAddr>> addrs(PeerId p) async => addresses[p] ?? [];
+}
+
+class _FakePeerstore extends Fake implements Peerstore {
+  @override
+  final _FakeAddrBook addrBook = _FakeAddrBook();
+}
+
 const _testThresholds = PeerScoreThresholds(gossipThreshold: -10, publishThreshold: -50, graylistThreshold: -80);
 
 // Use build_runner: dart pub run build_runner build --delete-conflicting-outputs
@@ -67,6 +102,7 @@ void main() {
     late MockEventTracer mockTracer;
     late MockPubSubProtocol mockComms;
     late GossipSubParams gossipSubParams;
+    late _FakePeerstore peerstore;
 
     /// The app-specific scores of the peers, which are their scores with
     /// [scoredRouter] (weight 1, nothing else scored).
@@ -112,6 +148,8 @@ void main() {
       when(mockHost.id).thenReturn(mockLocalPeerId); // PubSub uses host.id
       when(mockHost.network).thenReturn(mockNetwork); // Stub host.network
       when(mockHost.connManager).thenReturn(mockConnManager); // Stub host.connManager
+      peerstore = _FakePeerstore();
+      when(mockHost.peerStore).thenReturn(peerstore);
       when(mockNetwork.peers).thenReturn([]); // Default stub for network.peers
       // No connections: every peer added to the router is inbound.
       when(mockNetwork.connsToPeer(any)).thenReturn([]);
@@ -1805,8 +1843,9 @@ void main() {
         testRouter.start();
         async.elapse(params.heartbeatInitialDelay);
         async.flushMicrotasks();
+        final mesh = {for (final p in testRouter.mesh[testTopicName]!) names[p]!};
         testRouter.stop();
-        return (sent, {for (final p in testRouter.mesh[testTopicName]!) names[p]!});
+        return (sent, mesh);
       }
 
       test('heartbeat prunes the mesh peers with a negative score, without PX', () {
@@ -2237,11 +2276,15 @@ void main() {
         sent.clear();
       }
 
+      /// Runs one heartbeat of [r]: the first starts it.
       void heartbeat(FakeAsync async, GossipSubParams params) {
-        r.start();
-        async.elapse(params.heartbeatInitialDelay);
+        if (r.isStarted) {
+          async.elapse(params.heartbeatInterval);
+        } else {
+          r.start();
+          async.elapse(params.heartbeatInitialDelay);
+        }
         async.flushMicrotasks();
-        r.stop();
       }
 
       test('the heartbeat gossips recent message IDs to DLazy topic peers outside the mesh', () {
@@ -2414,6 +2457,150 @@ void main() {
           async.flushMicrotasks();
           expect(iwantIds(p), isEmpty);
         });
+      });
+    });
+
+    group('Peer Exchange, as go-libp2p-pubsub', () {
+      const topicName = 'px-topic';
+      late PeerId pruner;
+      late List<AddrInfo> connected;
+
+      /// A peer with a key, for signed peer records.
+      Future<(PeerId, KeyPair)> keyedPeer() async {
+        final keys = await generateEd25519KeyPair();
+        return (PeerId.fromPublicKey(keys.publicKey), keys);
+      }
+
+      Future<List<int>> signedRecord(PeerId peerId, KeyPair signer, List<MultiAddr> addrs) async {
+        final envelope = await Envelope.seal(PeerRecord(peerId: peerId, addrs: addrs, seq: 1), signer.privateKey);
+        return envelope.marshal();
+      }
+
+      pb.RPC pruneWithPx(List<pb.PeerInfo> px) => pb.RPC()
+        ..control = (pb.ControlMessage()
+          ..prune.add(pb.ControlPrune()
+            ..topicID = topicName
+            ..backoff = Int64(60)
+            ..peers.addAll(px)));
+
+      setUpAll(() {
+        // As a dart_libp2p host does when it is created.
+        RecordRegistry.register<record_pb.PeerRecord>(
+            String.fromCharCodes(PeerRecordEnvelopePayloadType), record_pb.PeerRecord.fromBuffer);
+      });
+
+      setUp(() async {
+        // Real peer IDs throughout: PeerId.== fails on a mock.
+        when(mockHost.id).thenReturn((await keyedPeer()).$1);
+        pruner = (await keyedPeer()).$1;
+        setScore(router, pruner, 0);
+        await router.join(Topic(topicName));
+        connected = [];
+        when(mockNetwork.connectedness(any)).thenReturn(Connectedness.notConnected);
+        when(mockHost.connect(any, context: anyNamed('context'))).thenAnswer((inv) async {
+          connected.add(inv.positionalArguments[0] as AddrInfo);
+        });
+      });
+
+      test('connects to the PX peers of a PRUNE at the addresses of their signed records', () async {
+        final (pxPeer, keys) = await keyedPeer();
+        final addr = MultiAddr('/ip4/10.0.0.1/tcp/4001');
+        await router.handleRpc(pruner, pruneWithPx([
+          pb.PeerInfo()
+            ..peerID = pxPeer.toBytes()
+            ..signedPeerRecord = await signedRecord(pxPeer, keys, [addr]),
+        ]));
+        await pumpEventQueue();
+
+        expect(connected.single.id, equals(pxPeer));
+        expect(connected.single.addrs.map((a) => a.toString()), [addr.toString()]);
+        expect(peerstore.addrBook.records, contains(pxPeer));
+      });
+
+      test('connects to PX peers without a record at the addresses it knows', () async {
+        final (pxPeer, _) = await keyedPeer();
+        await router.handleRpc(pruner, pruneWithPx([pb.PeerInfo()..peerID = pxPeer.toBytes()]));
+        await pumpEventQueue();
+
+        expect(connected.single.id, equals(pxPeer));
+      });
+
+      test('ignores PX from a peer with a score below acceptPXThreshold', () async {
+        setScore(router, pruner, -1); // acceptPXThreshold is 0.
+        final (pxPeer, _) = await keyedPeer();
+        await router.handleRpc(pruner, pruneWithPx([pb.PeerInfo()..peerID = pxPeer.toBytes()]));
+        await pumpEventQueue();
+
+        expect(connected, isEmpty);
+      });
+
+      test('skips a PX peer whose record is signed by another key or is about another peer', () async {
+        final (pxPeer, _) = await keyedPeer();
+        final (otherPeer, otherKeys) = await keyedPeer();
+        await router.handleRpc(pruner, pruneWithPx([
+          pb.PeerInfo()
+            ..peerID = pxPeer.toBytes()
+            ..signedPeerRecord = await signedRecord(pxPeer, otherKeys, [MultiAddr('/ip4/10.0.0.2/tcp/1')]),
+          pb.PeerInfo()
+            ..peerID = pxPeer.toBytes()
+            ..signedPeerRecord = await signedRecord(otherPeer, otherKeys, [MultiAddr('/ip4/10.0.0.3/tcp/1')]),
+          pb.PeerInfo()..peerID = [1, 2, 3], // Not a peer ID.
+        ]));
+        await pumpEventQueue();
+
+        expect(connected, isEmpty);
+        expect(peerstore.addrBook.records, isEmpty);
+      });
+
+      test('skips PX peers already connected or known, and connects to at most prunePeers', () async {
+        final (known, _) = await keyedPeer();
+        await router.addPeer(known, gossipSubIDv11);
+        final (alreadyConnected, _) = await keyedPeer();
+        when(mockNetwork.connectedness(alreadyConnected)).thenReturn(Connectedness.connected);
+        final others = [for (var i = 0; i < router.params.prunePeers + 4; i++) (await keyedPeer()).$1];
+
+        await router.handleRpc(pruner, pruneWithPx([pb.PeerInfo()..peerID = known.toBytes()]));
+        await router.handleRpc(pruner, pruneWithPx([pb.PeerInfo()..peerID = alreadyConnected.toBytes()]));
+        await pumpEventQueue();
+        expect(connected, isEmpty);
+
+        await router.handleRpc(pruner, pruneWithPx([for (final p in others) pb.PeerInfo()..peerID = p.toBytes()]));
+        await pumpEventQueue();
+        expect(connected, hasLength(router.params.prunePeers));
+      });
+
+      test('our PX carries the signed records of the peers we offer', () async {
+        final (pxPeer, keys) = await keyedPeer();
+        await peerstore.addrBook.consumePeerRecord(
+            await Envelope.consumeEnvelope(
+                    Uint8List.fromList(await signedRecord(pxPeer, keys, [MultiAddr('/ip4/10.0.0.4/tcp/1')])),
+                    PeerRecordEnvelopeDomain)
+                .then((r) => r.$1),
+            AddressTTL.tempAddrTTL);
+        when(mockNetwork.peers).thenReturn([pxPeer, pruner]);
+        await router.addPeer(pxPeer, gossipSubIDv11);
+        await router.handleRpc(
+            pxPeer,
+            pb.RPC()
+              ..subscriptions.add(pb.RPC_SubOpts()
+                ..subscribe = true
+                ..topicid = topicName));
+        await pumpEventQueue(); // The record is fetched in the background.
+        final sent = <pb.RPC>[];
+        when(mockComms.sendRpc(any, any, any)).thenAnswer((inv) async {
+          if (inv.positionalArguments[0] == pruner) sent.add(inv.positionalArguments[1] as pb.RPC);
+        });
+
+        await router.leave(Topic(topicName)); // No mesh peers: no PRUNE.
+        await router.join(Topic(topicName));
+        router.mesh[topicName]!.add(pruner);
+        await router.leave(Topic(topicName));
+        await pumpEventQueue();
+
+        final px = sent.expand((rpc) => rpc.control.prune).single.peers.single;
+        expect(px.peerID, equals(pxPeer.toBytes()));
+        final (_, record) = await Envelope.consumeEnvelope(Uint8List.fromList(px.signedPeerRecord), PeerRecordEnvelopeDomain);
+        expect((record as PeerRecord).peerId, equals(pxPeer));
       });
     });
   });

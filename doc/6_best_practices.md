@@ -79,6 +79,7 @@ The `GossipSubRouter` has background processes like the heartbeat timer.
 
 **Best Practice**:
 *   **Always Call `stop()`**: When your application is shutting down, make sure to call `await pubsub.stop()`. This will gracefully stop the router, cancel timers, and clean up resources.
+*   **Cancel subscriptions and dispose the tracer yourself**: `stop()` keeps subscriptions open and the tracer undisposed, so that `start()` can resume. If you do not restart, cancel the subscriptions (ending their streams) and call `tracer.dispose()`.
 
 **Pitfall**:
 *   Forgetting to call `stop()` can leave dangling processes or timers, which can cause issues or prevent your application from exiting cleanly.

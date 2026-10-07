@@ -1,5 +1,6 @@
 // Imports
 import 'dart:async';
+import 'dart:math';
 import 'dart:typed_data'; // For Uint8List, ByteData, Endian
 
 import 'package:dart_libp2p/core/host/host.dart';
@@ -191,6 +192,7 @@ class PubSub {
     _idGenerator = MessageIdGenerator() { // Initialize the ID generator
     _comms = PubSubProtocol(host, _handleRpc, maxMessageSize: maxMessageSize, protocols: router.protocols);
     _comms.onNewInboundPeer = _handleInboundPeer;
+    _comms.onPeerDead = _handlePeerDead;
     // It's important that the router is attached so it can also set up its
     // own protocol handlers or react to PubSub initialization.
     router.attach(this).then((_) {
@@ -329,7 +331,35 @@ class PubSub {
     if (isNew) announceSubscriptionsTo(peerId);
   }
 
+  /// The backoff of greeting again peers that ended our stream to them.
+  final _deadPeerBackoff = _DeadPeerBackoff();
+
+  /// A peer ended our stream to it, as go-libp2p-pubsub's handleDeadPeers:
+  /// it is removed from the router and, if still connected (it restarted
+  /// its pubsub, or a duplicate connection closed), greeted again after a
+  /// backoff, which opens a new stream and adds it back.
+  void _handlePeerDead(PeerId peerId) {
+    if (!_peers.contains(peerId)) return;
+    _log.fine('PubSub: Peer ${peerId.toBase58()} ended our stream to it.');
+    router.removePeer(peerId).catchError((e) {
+      _log.warning('PubSub: Error removing peer ${peerId.toBase58()}: $e');
+    });
+    _peers.remove(peerId);
+    if (!host.network.peers.contains(peerId)) return;
+    final delay = _deadPeerBackoff.next(peerId);
+    if (delay == null) {
+      _log.fine('PubSub: Giving up on ${peerId.toBase58()} after too many dead streams.');
+      return;
+    }
+    Timer(delay, () {
+      if (!_stopped && !_peers.contains(peerId) && host.network.peers.contains(peerId)) {
+        announceSubscriptionsTo(peerId);
+      }
+    });
+  }
+
   void _addPeer(PeerId peerId, String protocol) {
+    if (_stopped) return; // A greeting that completed after stop().
     if (!host.network.peers.contains(peerId)) return; // Gone already.
     if (_peers.add(peerId)) {
       router.addPeer(peerId, protocol).catchError((e) {
@@ -671,11 +701,27 @@ class PubSub {
     }
   }
 
-  // TODO: Add start() and stop() methods to PubSub to manage lifecycle of router and comms.
+  /// Whether [stop] was called after the last [start].
+  bool _stopped = false;
+
+  /// Starts the router and greets the connected peers. After [stop], starts
+  /// again: the protocol handlers are registered again, the subscribed
+  /// topics joined again and the connected peers greeted again.
   Future<void> start() async {
     _log.fine('PubSub: Starting...');
+    if (_stopped) {
+      _stopped = false;
+      _comms.start();
+    }
     await tracer.start();
     await router.start();
+    // Topics subscribed to before a stop are joined again (joining a topic
+    // already joined does nothing).
+    for (final topic in _subscriptions.keys) {
+      router.join(Topic(topic)).catchError((e, s) {
+        _log.warning('PubSub: Error joining topic $topic: $e\n$s');
+      });
+    }
     if (_peerNotifier == null) {
       _peerNotifier = PeerNotifier(host)
         // As in go-libp2p-pubsub, each side sends its subscriptions to a new
@@ -689,18 +735,29 @@ class PubSub {
         if (!_peers.contains(peerId)) announceSubscriptionsTo(peerId);
       }
     }
-    // _comms is started implicitly by its constructor (registers handlers).
     _log.fine('PubSub: Started successfully.');
   }
 
+  /// Stops the router, removes all peers from it and closes all pubsub
+  /// streams, so that the node no longer takes part in the network.
+  ///
+  /// Subscriptions and validators are kept: after [start], the node joins
+  /// its topics again and the subscriptions receive messages again. To end
+  /// a subscription's stream, cancel it. The tracer is flushed but not
+  /// disposed; dispose it after the last stop.
   Future<void> stop() async {
     _log.fine('PubSub: Stopping...');
+    _stopped = true;
     _peerNotifier?.dispose();
     _peerNotifier = null;
+    for (final peerId in _peers.toList()) {
+      await router.removePeer(peerId);
+    }
+    _peers.clear();
+    _greeting.clear();
     await router.stop();
-    await _comms.close(); // Unregisters protocol handlers
+    await _comms.close(); // Unregisters protocol handlers, closes streams.
     await tracer.stop();
-    await tracer.dispose();
     _log.fine('PubSub: Stopped successfully.');
   }
 
@@ -740,3 +797,42 @@ class PubSub {
     _log.fine('PubSub: Removed disconnected peer ${peerId.toBase58()}');
   }
 }
+
+/// The backoff of go-libp2p-pubsub's `backoff`, for greeting again a peer
+/// that ended our stream to it: none the first time, then 100 ms doubling
+/// (with up to 100 ms of jitter) to 10 s, and at most 4 attempts within
+/// 10 minutes.
+final _random = Random();
+
+class _DeadPeerBackoff {
+  static const _min = Duration(milliseconds: 100);
+  static const _max = Duration(seconds: 10);
+  static const _timeToLive = Duration(minutes: 10);
+  static const _maxAttempts = 4;
+
+  final Map<PeerId, ({Duration delay, DateTime lastTried, int attempts})> _history = {};
+
+  /// The delay before the next attempt for [peerId], or null if it had too
+  /// many.
+  Duration? next(PeerId peerId) {
+    final now = DateTime.now();
+    _history.removeWhere((_, h) => now.difference(h.lastTried) > _timeToLive);
+    final h = _history[peerId];
+    Duration delay;
+    if (h == null) {
+      delay = Duration.zero;
+    } else if (h.attempts >= _maxAttempts) {
+      return null;
+    } else if (h.delay < _min) {
+      delay = _min;
+    } else if (h.delay < _max) {
+      delay = h.delay * 2 + Duration(milliseconds: _random.nextInt(100));
+      if (delay > _max) delay = _max;
+    } else {
+      delay = h.delay;
+    }
+    _history[peerId] = (delay: delay, lastTried: now, attempts: (h?.attempts ?? 0) + 1);
+    return delay;
+  }
+}
+

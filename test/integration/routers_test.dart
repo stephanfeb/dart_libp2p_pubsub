@@ -137,4 +137,35 @@ void main() {
       expect(small.selectPeers(topic, random), hasLength(randomSubD));
     });
   });
+
+  group('stop and start', () {
+    for (final (name, make) in [
+      ('GossipSub', () => GossipSubRouter() as Router),
+      ('FloodSub', () => FloodSubRouter() as Router),
+    ]) {
+      test('a $name node stopped leaves the network and rejoins it when started again', () async {
+        final a = await node(make());
+        final b = await node(make());
+        await startAll();
+        List<String> texts(_Node n) => n.received.map((m) => String.fromCharCodes(m.data)).toList();
+
+        await publish(a, 'before');
+        expect(texts(b), ['before']);
+
+        await b.pubsub.stop().timeout(const Duration(seconds: 5));
+        if (b.router case final GossipSubRouter r) expect(r.mesh, isEmpty);
+        await publish(a, 'while stopped');
+        expect(texts(b), ['before']);
+
+        await b.pubsub.start();
+        await Future.delayed(const Duration(milliseconds: 300));
+        if (b.router case final GossipSubRouter r) expect(r.mesh[topic], {a.id});
+        await publish(a, 'after restart');
+        await publish(b, 'from b');
+
+        expect(texts(b), ['before', 'after restart', 'from b']);
+        expect(texts(a), ['before', 'while stopped', 'after restart', 'from b']);
+      });
+    }
+  });
 }

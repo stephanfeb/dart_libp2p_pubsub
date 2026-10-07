@@ -2,8 +2,16 @@ import 'dart:async';
 import 'dart:math';
 import 'dart:typed_data';
 
+import 'dart:collection';
+
+import 'package:dart_libp2p/core/certified_addr_book.dart';
 import 'package:dart_libp2p/core/network/common.dart' show Direction;
+import 'package:dart_libp2p/core/network/network.dart' show Connectedness;
+import 'package:dart_libp2p/core/peer/addr_info.dart';
 import 'package:dart_libp2p/core/peer/peer_id.dart';
+import 'package:dart_libp2p/core/peer/record.dart';
+import 'package:dart_libp2p/core/peerstore.dart' show AddressTTL;
+import 'package:dart_libp2p/core/record/envelope.dart';
 import 'package:clock/clock.dart';
 import 'package:fixnum/fixnum.dart';
 
@@ -53,8 +61,21 @@ class GossipSubParams {
   /// The number of peers gossiped to (IHAVE) per topic at each heartbeat.
   final int DLazy;
 
-  /// The number of peers included in the Peer Exchange of a PRUNE.
+  /// The number of peers included in the Peer Exchange of a PRUNE, and the
+  /// most peers we connect to from one received PRUNE.
   final int prunePeers;
+
+  /// The number of connections to Peer Exchange peers attempted at once
+  /// (go-libp2p-pubsub's `Connectors`).
+  final int connectors;
+
+  /// The most Peer Exchange peers waiting to be connected to; more are
+  /// ignored (go-libp2p-pubsub's `MaxPendingConnections`).
+  final int maxPendingConnections;
+
+  /// How long a connection attempt to a Peer Exchange peer may take
+  /// (go-libp2p-pubsub's `ConnectionTimeout`).
+  final Duration connectionTimeout;
 
   /// How long the router remembers the ID of a message it has seen
   /// (go-libp2p-pubsub's `TimeCacheDuration`).
@@ -136,6 +157,9 @@ class GossipSubParams {
     this.fanoutTTL = const Duration(minutes: 1),
     this.DLazy = 6,
     this.prunePeers = 16,
+    this.connectors = 8,
+    this.maxPendingConnections = 128,
+    this.connectionTimeout = const Duration(seconds: 30),
     this.seenMessagesTTL = const Duration(minutes: 2),
     this.heartbeatInterval = const Duration(seconds: 1),
     this.heartbeatInitialDelay = const Duration(milliseconds: 100),
@@ -267,6 +291,18 @@ class GossipSubRouter implements Router {
   /// IDONTWANTs received from each peer since the last heartbeat.
   final Map<PeerId, int> _peerDontWant = {};
 
+  /// Peer Exchange peers waiting to be connected to, with their signed peer
+  /// records, as go-libp2p-pubsub's `connect` channel.
+  final Queue<(PeerId, List<int>?)> _pxPending = Queue();
+
+  /// The connections to Peer Exchange peers being attempted.
+  int _pxConnecting = 0;
+
+  /// The signed peer record of each peer, marshalled, as offered in our
+  /// Peer Exchange. Fetched from the certified address book in the
+  /// background, as building a PRUNE is synchronous.
+  final Map<PeerId, List<int>> _signedRecords = {};
+
   /// The protocols of GossipSub, in order of preference, as
   /// go-libp2p-pubsub's `GossipSubDefaultProtocols` (without v1.3).
   static const List<String> defaultProtocols = [gossipSubIDv12, gossipSubIDv11, gossipSubIDv10, floodSubID];
@@ -365,6 +401,7 @@ class GossipSubRouter implements Router {
     final conns = _pubsub?.host.network.connsToPeer(peerId) ?? const [];
     _outbound[peerId] = conns.any((c) => !c.stat.stats.limited && c.stat.stats.direction == Direction.outbound);
     _score?.addPeer(peerId);
+    if (doPX) _fetchSignedRecord(peerId);
     _pubsub?.tracer.trace(trace_pb.TraceEvent()
       ..type = trace_pb.TraceEvent_Type.ADD_PEER
       ..peerID = peerId.toBytes()
@@ -396,6 +433,7 @@ class GossipSubRouter implements Router {
     _iAsked.remove(peerId);
     _unwanted.remove(peerId);
     _peerDontWant.remove(peerId);
+    _signedRecords.remove(peerId);
     _score?.removePeer(peerId);
     _rpcQueueManagerOrNull?.peerDisconnected(peerId);
     _pubsub?.host.connManager.unprotect(peerId, 'gossipsub-mesh');
@@ -683,6 +721,7 @@ class GossipSubRouter implements Router {
 
   /// Handles the PRUNEs of [control], as go-libp2p-pubsub's handlePrune.
   void _handlePrune(PeerId peerId, pb.ControlMessage control) {
+    final score = _scoreOf(peerId);
     for (final prune in control.prune) {
       final topicId = prune.topicID;
       final peers = mesh[topicId];
@@ -694,8 +733,104 @@ class GossipSubRouter implements Router {
       }
       _addBackoff(peerId, topicId, _pruneBackoffOf(prune));
       _unprotectIfNotInMesh(peerId);
-      // TODO(px): connect to the PX peers of senders above acceptPXThreshold.
+      if (prune.peers.isEmpty) continue;
+      // As go-libp2p-pubsub: PX from a peer with too low a score is ignored.
+      if (score < thresholds.acceptPXThreshold) {
+        _log.fine('GossipSubRouter: Ignoring PX from $peerId with score $score.');
+        continue;
+      }
+      _pxConnect(prune.peers);
     }
+  }
+
+  /// Queues connections to the Peer Exchange peers [peers], as
+  /// go-libp2p-pubsub's pxConnect: at most [GossipSubParams.prunePeers] of
+  /// them, chosen at random, skipping the peers we already have. Peers that
+  /// do not fit in [GossipSubParams.maxPendingConnections] are ignored.
+  void _pxConnect(List<pb.PeerInfo> peers) {
+    if (peers.length > params.prunePeers) {
+      peers = (peers.toList()..shuffle(_random)).sublist(0, params.prunePeers);
+    }
+    final self = _pubsub?.host.id;
+    for (final info in peers) {
+      final PeerId peerId;
+      try {
+        peerId = PeerId.fromBytes(Uint8List.fromList(info.peerID));
+      } catch (e) {
+        _log.fine('GossipSubRouter: Ignoring PX peer with an invalid ID: $e');
+        continue;
+      }
+      if (self == peerId || _peerProtocols.containsKey(peerId)) continue;
+      if (_pxPending.length >= params.maxPendingConnections) {
+        _log.fine('GossipSubRouter: Ignoring PX peer $peerId; too many pending connections.');
+        continue;
+      }
+      _pxPending.add((peerId, info.hasSignedPeerRecord() ? info.signedPeerRecord : null));
+    }
+    while (_pxConnecting < params.connectors && _pxPending.isNotEmpty) {
+      _pxConnecting++;
+      _pxConnector().whenComplete(() => _pxConnecting--);
+    }
+  }
+
+  /// Connects to the queued Peer Exchange peers until none are left, as
+  /// go-libp2p-pubsub's connector.
+  Future<void> _pxConnector() async {
+    while (_pxPending.isNotEmpty) {
+      final (peerId, record) = _pxPending.removeFirst();
+      final host = _pubsub?.host;
+      if (host == null) return;
+      try {
+        if (host.network.connectedness(peerId) == Connectedness.connected) continue;
+        if (record != null && !await _consumePeerRecord(peerId, record)) continue;
+        final addrs = await host.peerStore.addrBook.addrs(peerId);
+        _log.fine('GossipSubRouter: Connecting to PX peer $peerId at $addrs.');
+        await host.connect(AddrInfo(peerId, addrs)).timeout(params.connectionTimeout);
+      } catch (e) {
+        _log.fine('GossipSubRouter: Error connecting to PX peer $peerId: $e');
+      }
+    }
+  }
+
+  /// Checks the signed peer record [bytes] of the PX peer [peerId] and
+  /// stores its addresses, as go-libp2p-pubsub's pxConnect and connector.
+  /// Returns false if the record is invalid, so the peer is skipped.
+  Future<bool> _consumePeerRecord(PeerId peerId, List<int> bytes) async {
+    final Envelope envelope;
+    try {
+      final (env, record) = await Envelope.consumeEnvelope(Uint8List.fromList(bytes), PeerRecordEnvelopeDomain);
+      // The record must be about the peer and signed by its key.
+      if (record is! PeerRecord || record.peerId != peerId || PeerId.fromPublicKey(env.publicKey) != peerId) {
+        _log.fine('GossipSubRouter: Bogus peer record from PX for $peerId.');
+        return false;
+      }
+      envelope = env;
+    } catch (e) {
+      _log.fine('GossipSubRouter: Invalid peer record from PX for $peerId: $e');
+      return false;
+    }
+    final (ok, cab) = getCertifiedAddrBook(_pubsub?.host.peerStore.addrBook);
+    if (ok) {
+      try {
+        await cab!.consumePeerRecord(envelope, AddressTTL.tempAddrTTL);
+      } catch (e) {
+        _log.fine('GossipSubRouter: Error storing peer record of $peerId: $e');
+      }
+    }
+    return true;
+  }
+
+  /// Fetches the signed peer record of [peerId] for our Peer Exchange.
+  void _fetchSignedRecord(PeerId peerId) {
+    final (ok, cab) = getCertifiedAddrBook(_pubsub?.host.peerStore.addrBook);
+    if (!ok) return;
+    () async {
+      final envelope = await cab!.getPeerRecord(peerId);
+      if (envelope == null || !_peerProtocols.containsKey(peerId)) return;
+      _signedRecords[peerId] = await envelope.marshal();
+    }().catchError((Object e) {
+      _log.fine('GossipSubRouter: Error fetching the peer record of $peerId: $e');
+    });
   }
 
   /// The backoff that a received PRUNE asks for: [GossipSubParams.pruneBackoff]
@@ -935,10 +1070,24 @@ class GossipSubRouter implements Router {
     _log.fine('GossipSubRouter started.');
   }
 
+  /// Stops the heartbeat and forgets the peers, meshes and fanouts, so that
+  /// [start] begins afresh: [PubSub.start] joins the subscribed topics
+  /// again and adds the peers again.
   @override
   Future<void> stop() async {
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
+    for (final peerId in {..._peerProtocols.keys, ..._peerTopics.keys}) {
+      await removePeer(peerId);
+    }
+    mesh.clear();
+    fanout.clear();
+    fanoutLastPublished.clear();
+    _backoff.clear();
+    _promises.clear();
+    _pxPending.clear();
+    _signedRecords.clear();
+    _rpcQueueManagerOrNull?.clearAll();
     _score?.stop();
     _seenMessages.clear();
     _log.fine('GossipSubRouter stopped.');
@@ -1011,7 +1160,15 @@ class GossipSubRouter implements Router {
     prune.backoff = Int64(backoff.inSeconds);
     if (doPX) {
       for (final px in _getPeers(topicId, params.prunePeers, (p) => p != peerId && _scoreOf(p) >= 0)) {
-        prune.peers.add(pb.PeerInfo()..peerID = px.toBytes());
+        // As go-libp2p-pubsub: with the peer's signed record, if we have it.
+        final info = pb.PeerInfo()..peerID = px.toBytes();
+        final record = _signedRecords[px];
+        if (record != null) {
+          info.signedPeerRecord = record;
+        } else {
+          _fetchSignedRecord(px); // For the next PRUNE.
+        }
+        prune.peers.add(info);
       }
     }
     return prune;

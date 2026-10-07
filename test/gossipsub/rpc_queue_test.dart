@@ -107,6 +107,9 @@ class MockPubSubProtocol implements PubSubProtocol {
   void Function(PeerId peerId, String protocol)? onNewInboundPeer;
 
   @override
+  void Function(PeerId peerId)? onPeerDead;
+
+  @override
   int maxMessageSize = 1 << 20;
 
   @override
@@ -169,9 +172,7 @@ class MockPubSubProtocol implements PubSubProtocol {
   }
 
   @override
-  void start() {
-    throw UnimplementedError();
-  }
+  void start() {}
 
   @override
   void stop() {

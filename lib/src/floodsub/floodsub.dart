@@ -161,6 +161,9 @@ class FloodSubRouter implements Router {
 
   @override
   Future<void> stop() async {
+    for (final peerId in {...peerProtocols.keys, ..._peerTopics.keys}) {
+      await removePeer(peerId);
+    }
     _seen.clear();
   }
 }

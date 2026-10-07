@@ -137,7 +137,13 @@ The thresholds: below `gossipThreshold` a peer gets no gossip and its gossip is 
 
 Peer Exchange is off by default, as in go-libp2p-pubsub (`WithPeerExchange`); `GossipSubRouter(doPX: true)` turns it on, for bootstrappers and other well-connected nodes.
 
--   `prunePeers` (default: `16`): The number of other topic peers with a score of 0 or more to include in a `PRUNE`. No PX is sent to a peer pruned for a negative score.
+-   `prunePeers` (default: `16`): The number of other topic peers with a score of 0 or more to include in a `PRUNE`, with their signed peer records when the address book has them. No PX is sent to a peer pruned for a negative score. It is also the most peers connected to from one received `PRUNE`.
+
+Whatever `doPX` is, the router connects to the PX peers of a received `PRUNE` if the sender's score is at least `acceptPXThreshold` (`PeerScoreThresholds`, default `0`), as go-libp2p-pubsub does. A signed peer record must be about the peer and signed by its key; its addresses are stored in the address book for two minutes, then the peer is dialed at the addresses known for it.
+
+-   `connectors` (default: `8`): the PX connections attempted at once.
+-   `maxPendingConnections` (default: `128`): the PX peers waiting to be connected to; more are ignored.
+-   `connectionTimeout` (default: `30 seconds`): how long a PX connection attempt may take.
 
 **Tuning Advice**:
 *   A higher value can help pruned peers reconnect faster, improving overall network health.

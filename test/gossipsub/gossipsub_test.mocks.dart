@@ -854,6 +854,15 @@ class MockPubSubProtocol extends _i1.Mock implements _i12.PubSubProtocol {
       );
 
   @override
+  set onPeerDead(void Function(_i2.PeerId)? _onPeerDead) => super.noSuchMethod(
+        Invocation.setter(
+          #onPeerDead,
+          _onPeerDead,
+        ),
+        returnValueForMissingStub: null,
+      );
+
+  @override
   List<String> get protocols => (super.noSuchMethod(
         Invocation.getter(#protocols),
         returnValue: <String>[],
@@ -873,6 +882,15 @@ class MockPubSubProtocol extends _i1.Mock implements _i12.PubSubProtocol {
         Invocation.getter(#maxMessageSize),
         returnValue: 0,
       ) as int);
+
+  @override
+  void start() => super.noSuchMethod(
+        Invocation.method(
+          #start,
+          [],
+        ),
+        returnValueForMissingStub: null,
+      );
 
   @override
   String? protocolOf(_i2.PeerId? peerId) =>
