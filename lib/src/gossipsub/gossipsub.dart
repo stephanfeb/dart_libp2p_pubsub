@@ -14,7 +14,7 @@ import 'rpc_queue.dart'; // For RpcOutgoingQueueManager
 import 'mcache.dart'; // For MessageCache
 import '../pb/trace.pb.dart' as trace_pb; // For trace event types
 import '../util/midgen.dart'; // For defaultMessageIdFn
-import '../core/validation.dart'; // For ValidationResult
+import '../util/timecache.dart'; // For FirstSeenCache
 import 'package:logging/logging.dart';
 
 final _log = Logger('GossipSubRouter');
@@ -38,6 +38,10 @@ class GossipSubParams {
   final int prunePeers;
   // Score threshold for opportunistic grafting.
   final double opportunisticGraftScoreThreshold;
+  /// How long the router remembers the ID of a message it has seen
+  /// (go-libp2p-pubsub's `TimeCacheDuration`). A copy of a message that
+  /// arrives within this time is dropped as a duplicate without validation.
+  final Duration seenMessagesTTL;
   // etc.
 
   GossipSubParams({
@@ -49,6 +53,7 @@ class GossipSubParams {
     this.DLazy = 6, // Default number of peers for IHAVE gossip
     this.prunePeers = 5, // Default number of peers for PX in PRUNE
     this.opportunisticGraftScoreThreshold = 10.0, // Default score for opportunistic grafting
+    this.seenMessagesTTL = const Duration(minutes: 2),
   });
 
   static GossipSubParams get defaultParams => GossipSubParams();
@@ -60,6 +65,17 @@ class GossipSubRouter implements Router {
   late final GossipSubParams params;
   late final RpcOutgoingQueueManager _rpcQueueManager;
   late final MessageCache _mcache;
+
+  /// IDs of the messages seen recently, whatever their validation result.
+  /// A message is marked here before validation, so its duplicates are not
+  /// validated again.
+  late final FirstSeenCache<String> _seenMessages;
+
+  /// IDs of the messages that failed validation with reject. A peer that
+  /// sends a duplicate of such a message is penalised too.
+  late final FirstSeenCache<String> _rejectedMessages;
+
+  static const int _seenMessagesCapacity = 1 << 17;
 
   /// Peers in the mesh, per topic. Mesh peers are those we have an explicit
   /// bidirectional link with for a topic, used for full message propagation.
@@ -96,7 +112,11 @@ class GossipSubRouter implements Router {
     _mcache = MessageCache(
         // TODO: Consider passing cache parameters from GossipSubParams
         );
+    _seenMessages = FirstSeenCache<String>(this.params.seenMessagesTTL, _seenMessagesCapacity);
+    _rejectedMessages = FirstSeenCache<String>(this.params.seenMessagesTTL, _seenMessagesCapacity);
   }
+
+  bool _isSeen(String msgId) => _seenMessages.contains(msgId) || _mcache.seen(msgId);
 
   @override
   Future<void> attach(PubSub pubsub) async {
@@ -167,111 +187,25 @@ class GossipSubRouter implements Router {
       ..recvRPC = recvRpcTrace
     );
 
+    // Messages: drop duplicates first, then validate the new ones. Validation
+    // can be async, so the messages of this RPC are validated concurrently,
+    // and the subscriptions and control messages below are handled while
+    // validation runs.
+    final List<Future<String?>> pendingMessages = [];
     if (rpc.publish.isNotEmpty) {
+      // Use the messageIdFn from pubsub, falling back to default if pubsub or its fn is null
+      final msgIdFn = _pubsub?.messageIdFn ?? defaultMessageIdFn;
       for (final msgProto in rpc.publish) {
-        // Use the messageIdFn from pubsub, falling back to default if pubsub or its fn is null
-        final msgIdFn = _pubsub?.messageIdFn ?? defaultMessageIdFn;
         final msgIdStr = msgIdFn(msgProto);
-        final msgIdBytes = msgIdStr.codeUnits; // msgIdStr should not be null here
 
-        // --- BEGIN INSERTED VALIDATION LOGIC ---
-        final pubSubMessage = PubSubMessage(rpcMessage: msgProto, receivedFrom: peerId);
-        final validationResult = await _pubsub?.validateMessage(pubSubMessage);
-
-        if (validationResult == null) { // Should not happen if pubsub is attached
-            _log.warning('GossipSubRouter: PubSub not available for validation. Message $msgIdStr from $peerId dropped.');
-            // Optionally trace an error or internal issue
-            continue;
-        }
-
-        if (validationResult == ValidationResult.reject || validationResult == ValidationResult.ignore) {
-          _log.fine('GossipSubRouter: Message $msgIdStr from $peerId failed validation ($validationResult). Dropping.');
-          final rejectMsgTrace = trace_pb.TraceEvent_RejectMessage()
-            ..messageID = msgIdBytes
-            ..receivedFrom = peerId.toBytes()
-            ..topic = msgProto.topic
-            ..reason = validationResult.name; // Use enum .name for string representation
-          _pubsub?.tracer.trace(trace_pb.TraceEvent()
-            ..type = trace_pb.TraceEvent_Type.REJECT_MESSAGE
-            ..peerID = peerId.toBytes()
-            ..rejectMessage = rejectMsgTrace
-          );
-          continue; // Skip further processing for this message
-        }
-        // --- END INSERTED VALIDATION LOGIC ---
-
-        // If validation passed (accept), then proceed with duplicate check and processing
-        if (_mcache.seen(msgIdStr)) {
-          _log.fine('GossipSubRouter: Received duplicate message $msgIdStr from $peerId. Ignoring.');
-          final duplicateMsgTrace = trace_pb.TraceEvent_DuplicateMessage()
-            ..messageID = msgIdBytes
-            ..receivedFrom = peerId.toBytes()
-            ..topic = msgProto.topic;
-          _pubsub?.tracer.trace(trace_pb.TraceEvent()
-            ..type = trace_pb.TraceEvent_Type.DUPLICATE_MESSAGE
-            ..peerID = peerId.toBytes()
-            ..duplicateMessage = duplicateMsgTrace
-          );
+        if (_isSeen(msgIdStr)) {
+          _handleDuplicate(peerId, msgProto, msgIdStr);
           continue;
         }
-        acceptedMessageIds.add(msgIdStr);
-        _log.fine('GossipSubRouter: Received new message $msgIdStr from $peerId to process/forward.');
-        _mcache.put(msgProto);
-
-        // Trace DELIVER_MESSAGE as the router has accepted it for processing/forwarding
-        final deliverMsgTrace = trace_pb.TraceEvent_DeliverMessage()
-          ..messageID = msgIdBytes
-          ..receivedFrom = peerId.toBytes()
-          ..topic = msgProto.topic;
-        _pubsub?.tracer.trace(trace_pb.TraceEvent()
-          ..type = trace_pb.TraceEvent_Type.DELIVER_MESSAGE
-          ..peerID = peerId.toBytes() // Peer from which the message was received that is now being delivered/processed
-          ..deliverMessage = deliverMsgTrace
-        );
-
-        // Forward the valid message to other mesh peers for the topic
-        final topicId = msgProto.topic;
-        final meshPeersForTopic = mesh[topicId];
-        if (meshPeersForTopic != null && meshPeersForTopic.isNotEmpty) {
-          final rpcToSend = pb.RPC()..publish.add(msgProto);
-          int forwardedCount = 0;
-          for (final meshPeerId in meshPeersForTopic) {
-            if (meshPeerId == peerId) continue; // Don't send back to the source
-
-            // TODO: Check if this peer has already seen the message (e.g. via mcache or a per-peer seen cache)
-            // For now, assume mcache check at their end is sufficient, or rely on not sending back to source.
-            
-            _log.fine('GossipSubRouter: Forwarding message $msgIdStr on topic $topicId to mesh peer ${meshPeerId.toBase58()}');
-            final messageMeta = trace_pb.TraceEvent_MessageMeta()
-              ..messageID = msgIdBytes
-              ..topic = topicId;
-            final rpcMeta = trace_pb.TraceEvent_RPCMeta()..messages.add(messageMeta);
-            final sendRpcTrace = trace_pb.TraceEvent_SendRPC()
-              ..sendTo = meshPeerId.toBytes()
-              ..meta = rpcMeta;
-            _pubsub?.tracer.trace(trace_pb.TraceEvent()
-              ..type = trace_pb.TraceEvent_Type.SEND_RPC
-              ..peerID = meshPeerId.toBytes()
-              ..sendRPC = sendRpcTrace
-            );
-            _rpcQueueManager.sendRpc(meshPeerId, rpcToSend, protocolId: gossipSubIDv11);
-            forwardedCount++;
-          }
-          if (forwardedCount > 0) {
-            _log.fine('GossipSubRouter: Forwarded message $msgIdStr to $forwardedCount mesh peers for topic $topicId.');
-          }
-        }
-        
-        // Also deliver to local subscribers if PubSub is attached
-        // This is typically handled by PubSub core after router processes it.
-        // The router's job is to propagate. PubSub itself will call deliverReceivedMessage.
-        // Let's assume PubSub will call its deliverReceivedMessage method after handleRpc completes
-        // and the message is validated and processed by the router.
-        // For now, we ensure the message is in mcache. The PubSub layer would then pick it up.
-        // If direct delivery from router is needed:
-        // final pubSubMessage = PubSubMessage(rpcMessage: msgProto, receivedFrom: peerId);
-        // _pubsub?.deliverReceivedMessage(pubSubMessage);
-
+        // Mark the message as seen before validation, whatever the result,
+        // so that its duplicates are not validated again.
+        _seenMessages.add(msgIdStr);
+        pendingMessages.add(_validateAndForward(peerId, msgProto, msgIdStr));
       }
     }
 
@@ -300,7 +234,7 @@ class GossipSubRouter implements Router {
         final List<String> wantedMessageIds = [];
         for (final ihaveEntry in control.ihave) {
           for (final msgId in ihaveEntry.messageIDs) {
-            if (!_mcache.seen(msgId)) {
+            if (!_isSeen(msgId)) {
               wantedMessageIds.add(msgId);
             }
           }
@@ -413,7 +347,115 @@ class GossipSubRouter implements Router {
         _log.fine('GossipSubRouter: Received IDONTWANT from $peerId.');
       }
     }
+
+    if (pendingMessages.isNotEmpty) {
+      for (final acceptedId in await Future.wait(pendingMessages)) {
+        if (acceptedId != null) acceptedMessageIds.add(acceptedId);
+      }
+    }
     return acceptedMessageIds;
+  }
+
+  /// Handles a message that was seen before: traces it as a duplicate and,
+  /// if the first copy was rejected, penalises [peerId] as go-libp2p-pubsub
+  /// does.
+  void _handleDuplicate(PeerId peerId, pb.Message msgProto, String msgIdStr) {
+    _log.fine('GossipSubRouter: Received duplicate message $msgIdStr from $peerId. Ignoring.');
+    final duplicateMsgTrace = trace_pb.TraceEvent_DuplicateMessage()
+      ..messageID = msgIdStr.codeUnits
+      ..receivedFrom = peerId.toBytes()
+      ..topic = msgProto.topic;
+    _pubsub?.tracer.trace(trace_pb.TraceEvent()
+      ..type = trace_pb.TraceEvent_Type.DUPLICATE_MESSAGE
+      ..peerID = peerId.toBytes()
+      ..duplicateMessage = duplicateMsgTrace
+    );
+    if (_rejectedMessages.contains(msgIdStr)) {
+      _pubsub?.getPeerScoreObject(peerId)?.recordInvalidMessage(msgProto.topic);
+    }
+  }
+
+  /// Validates a new message from [peerId]. If the message is accepted, puts
+  /// it in the message cache, forwards it to the mesh peers of its topic and
+  /// returns its ID; otherwise returns null. A rejected message penalises
+  /// [peerId] (the peer that delivered it, not its author) on the topic.
+  Future<String?> _validateAndForward(PeerId peerId, pb.Message msgProto, String msgIdStr) async {
+    final pubsub = _pubsub;
+    if (pubsub == null) {
+      _log.warning('GossipSubRouter: PubSub not available for validation. Message $msgIdStr from $peerId dropped.');
+      return null;
+    }
+    final msgIdBytes = msgIdStr.codeUnits;
+    final topicId = msgProto.topic;
+
+    ValidationResult validationResult;
+    try {
+      validationResult = await pubsub.validateMessage(
+          PubSubMessage(rpcMessage: msgProto, receivedFrom: peerId));
+    } catch (e) {
+      _log.warning('GossipSubRouter: Validation of message $msgIdStr from $peerId failed with an error: $e. Dropping.');
+      return null;
+    }
+    if (_pubsub == null) return null; // Detached while the message was in validation.
+
+    // PubSub traces REJECT_MESSAGE with the reason. Only reject costs the
+    // sender score; ignore does not.
+    if (validationResult == ValidationResult.reject) {
+      _log.fine('GossipSubRouter: Message $msgIdStr from $peerId rejected. Dropping and penalising the sender.');
+      _rejectedMessages.add(msgIdStr);
+      pubsub.getPeerScoreObject(peerId)?.recordInvalidMessage(topicId);
+      return null;
+    }
+    if (validationResult != ValidationResult.accept) {
+      _log.fine('GossipSubRouter: Message $msgIdStr from $peerId ignored by validation. Dropping.');
+      return null;
+    }
+
+    _log.fine('GossipSubRouter: Received new message $msgIdStr from $peerId to process/forward.');
+    _mcache.put(msgProto);
+
+    // Trace DELIVER_MESSAGE as the router has accepted it for processing/forwarding
+    final deliverMsgTrace = trace_pb.TraceEvent_DeliverMessage()
+      ..messageID = msgIdBytes
+      ..receivedFrom = peerId.toBytes()
+      ..topic = topicId;
+    pubsub.tracer.trace(trace_pb.TraceEvent()
+      ..type = trace_pb.TraceEvent_Type.DELIVER_MESSAGE
+      ..peerID = peerId.toBytes() // Peer from which the message was received that is now being delivered/processed
+      ..deliverMessage = deliverMsgTrace
+    );
+
+    // Forward the valid message to other mesh peers for the topic
+    final meshPeersForTopic = mesh[topicId];
+    if (meshPeersForTopic != null && meshPeersForTopic.isNotEmpty) {
+      final rpcToSend = pb.RPC()..publish.add(msgProto);
+      int forwardedCount = 0;
+      for (final meshPeerId in List<PeerId>.from(meshPeersForTopic)) {
+        if (meshPeerId == peerId) continue; // Don't send back to the source
+
+        _log.fine('GossipSubRouter: Forwarding message $msgIdStr on topic $topicId to mesh peer ${meshPeerId.toBase58()}');
+        final messageMeta = trace_pb.TraceEvent_MessageMeta()
+          ..messageID = msgIdBytes
+          ..topic = topicId;
+        final rpcMeta = trace_pb.TraceEvent_RPCMeta()..messages.add(messageMeta);
+        final sendRpcTrace = trace_pb.TraceEvent_SendRPC()
+          ..sendTo = meshPeerId.toBytes()
+          ..meta = rpcMeta;
+        pubsub.tracer.trace(trace_pb.TraceEvent()
+          ..type = trace_pb.TraceEvent_Type.SEND_RPC
+          ..peerID = meshPeerId.toBytes()
+          ..sendRPC = sendRpcTrace
+        );
+        _rpcQueueManager.sendRpc(meshPeerId, rpcToSend, protocolId: gossipSubIDv11);
+        forwardedCount++;
+      }
+      if (forwardedCount > 0) {
+        _log.fine('GossipSubRouter: Forwarded message $msgIdStr to $forwardedCount mesh peers for topic $topicId.');
+      }
+    }
+    // PubSub delivers the message to local subscribers after handleRpc
+    // returns, for the IDs that this method accepted.
+    return msgIdStr;
   }
 
   @override
@@ -428,6 +470,7 @@ class GossipSubRouter implements Router {
 
     final rpcToSend = pb.RPC()..publish.add(message.rpcMessage);
     _mcache.put(message.rpcMessage);
+    _seenMessages.add(defaultMessageIdFn(message.rpcMessage));
 
     final Set<PeerId> peersToPublish = {};
     final meshPeers = mesh[topicId];
@@ -653,6 +696,8 @@ class GossipSubRouter implements Router {
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
     _mcache.dispose();
+    _seenMessages.clear();
+    _rejectedMessages.clear();
     _log.fine('GossipSubRouter stopped, mcache and heartbeat timers stopped.');
   }
 

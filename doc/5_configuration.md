@@ -60,6 +60,38 @@ These parameters control how peer scores affect mesh management.
 *   In a network where you expect malicious actors, you might increase these thresholds to be more selective about who you connect to.
 *   Setting these too high can make it difficult to form a mesh in a new or small network.
 
+### Message Validation
+
+-   `seenMessagesTTL` (`GossipSubParams`, default: `2 minutes`): How long the router remembers a message ID. A copy that arrives within this time is dropped as a duplicate without validation.
+-   `validatorTimeout` (`PubSub` constructor, default: `5 seconds`): The default time limit for one run of a topic validator. A slower run gives `ignore`. `Duration.zero` means no limit. `registerTopicValidator(..., timeout:)` sets it per topic.
+-   `validateThrottle` (`PubSub` constructor, default: `8192`): The maximum number of messages in validation at the same time. More messages are dropped as `ignore`. `registerTopicValidator(..., concurrency:)` sets a per-topic limit (default `1024`).
+
+See [Validating Messages](./2_gossipsub_usage.md#6-validating-messages).
+
+### Invalid-Message Penalty (P3b)
+
+Peer scoring is always on: each `PubSub` uses `PeerScoreParams.defaultParams` unless you pass `scoreParams`. When validation rejects a message, the peer that delivered it gets a penalty on the topic of `invalidMessageDeliveriesWeight * counter^2` (P3b in the GossipSub v1.1 specification). Each rejected message adds 1 to the counter. The penalty applies at once; the counter is multiplied by `invalidMessageDeliveriesDecay` once per `decayInterval` and set to 0 when it falls below `decayToZero`. `ignore` results give no penalty.
+
+-   `invalidMessageDeliveriesWeight` (`TopicScoreParams`, default: `-1.0`): 1 rejected message gives -1, 2 give -4, 4 give -16, 10 give -100 (the default `graylistThreshold`). A peer with a negative score is not chosen for the mesh, fanout or gossip in normal selection. `0` turns the penalty off.
+-   `invalidMessageDeliveriesDecay` (`TopicScoreParams`, default: `0.9987`): With the default `decayInterval` of 1 second, the counter for one message decays to zero in about 1 hour (as `ScoreParameterDecay(time.Hour)` in go-libp2p-pubsub). If you change `decayInterval`, change this too.
+
+```dart
+final scoreParams = PeerScoreParams(
+  defaultTopicParams: TopicScoreParams(
+    invalidMessageDeliveriesWeight: -10.0, // stricter: 4 invalid messages => -160
+    invalidMessageDeliveriesDecay: 0.9987,
+  ),
+  topicParamsOverrides: {
+    'chat': TopicScoreParams(invalidMessageDeliveriesWeight: -1.0),
+  },
+);
+final pubsub = PubSub(host, router, scoreParams: scoreParams);
+```
+
+**Tuning Advice**:
+*   The defaults are a moderate starting point. Tune the weight to how much one invalid message on your topic is worth, relative to `graylistThreshold` and `DScore`.
+*   Note that `topicParamsOverrides` replaces all the parameters of a topic, so set the P3b fields in each override.
+
 ### Prune and Peer Exchange (PX)
 
 -   `prunePeers` (default: `5`): The number of alternative peers (from your own mesh) to include in a `PRUNE` message sent to another peer. This is the Peer Exchange (PX) mechanism, which helps the pruned peer find new connections and maintain network connectivity.

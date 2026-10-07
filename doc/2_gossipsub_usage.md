@@ -94,7 +94,36 @@ await nodeB.pubsub.publish(topicId, messageData);
 
 If Node A is subscribed to `news-alerts` and is part of the same GossipSub mesh as Node B, it will receive this message in its subscription stream.
 
-## 6. Unsubscribing and Stopping
+## 6. Validating Messages
+
+A node forwards a message to its mesh peers and delivers it to its subscribers only after the message passes validation. Register a validator for each topic to control what your node relays. The model is the same as `RegisterTopicValidator` in go-libp2p-pubsub.
+
+```dart
+pubsub.registerTopicValidator('news-alerts', (PeerId receivedFrom, PubSubMessage msg) async {
+  final text = utf8.decode(msg.data, allowMalformed: true);
+  if (text.length > 1000) return ValidationResult.reject; // invalid: penalise the sender
+  if (await isStale(text)) return ValidationResult.ignore; // valid, but not wanted: no penalty
+  return ValidationResult.accept;
+}, timeout: Duration(seconds: 2), concurrency: 64);
+
+// Later:
+pubsub.unregisterTopicValidator('news-alerts');
+```
+
+-   **accept**: the message is forwarded to the mesh and delivered to subscribers.
+-   **reject**: the message is dropped, and the peer that delivered it (`receivedFrom`, not the author `msg.from`) gets an invalid-message penalty on the topic. Return `reject` only for messages that are really invalid; honest peers forward any message that their own validator accepts.
+-   **ignore**: the message is dropped without a penalty.
+
+The checks run in this order:
+1.  **Duplicates.** A message whose ID was seen in the last `GossipSubParams.seenMessagesTTL` (default 2 minutes) is dropped before validation. A message is marked seen before it is validated, whatever the result, so a validator runs once per message. A peer that sends a copy of a message that was rejected is penalised too.
+2.  **Throttle.** At most `validateThrottle` messages (default 8192, a `PubSub` constructor argument) are in validation at the same time. More messages are dropped as `ignore`.
+3.  **Structure and signature.** A malformed or badly signed message is rejected.
+4.  **Validators of `registerMessageValidator`** (legacy, synchronous, all topics): `true` accepts and `false` rejects.
+5.  **The topic validator.** It can be async. A run that takes longer than its `timeout` (default: the `PubSub` `validatorTimeout`, 5 seconds; `Duration.zero` means no limit) gives `ignore`. If more than `concurrency` runs (default 1024) are active for the topic, the message is dropped as `ignore`. A validator that throws gives `ignore`.
+
+Validators also run on the messages that your node publishes; `receivedFrom` is then the local peer ID. Dropped messages are traced as `REJECT_MESSAGE` with a reason (`validation failed`, `validation ignored`, `validation throttled`, `validation timeout`, `invalid signature`, `invalid message`).
+
+## 7. Unsubscribing and Stopping
 
 When you no longer need to receive messages on a topic, you can unsubscribe.
 

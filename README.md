@@ -86,33 +86,36 @@ dart example/chat.dart
 dart example/chat.dart /ip4/127.0.0.1/tcp/4001/p2p/QmPeerId...
 ```
 
-### Custom Message Validation
+### Message Validation
+
+A node forwards and delivers a message only when validation accepts it. Register a validator per topic (the model of go-libp2p-pubsub's `RegisterTopicValidator`). It can be async:
 
 ```dart
-// Define a custom validator
-bool validateChatMessage(String topic, dynamic message) {
-  if (topic != '/chat/1.0.0') return false;
-  
-  final data = String.fromCharCodes(message.data);
-  return data.length <= 1000; // Max 1000 characters
-}
-
-// Register the validator
-pubsub.addValidator('/chat/1.0.0', validateChatMessage);
+pubsub.registerTopicValidator('/chat/1.0.0', (PeerId receivedFrom, PubSubMessage msg) async {
+  if (msg.data.length > 1000) return ValidationResult.reject; // invalid: drop and penalise the sender
+  if (!await isRelevant(msg)) return ValidationResult.ignore; // drop without a penalty
+  return ValidationResult.accept; // forward and deliver
+}, timeout: Duration(seconds: 2));
 ```
+
+Duplicates are dropped before validation, so a validator runs once per message. Validation has a per-run timeout (default 5 s, gives `ignore`) and a global limit of concurrent validations (default 8192). The older `registerMessageValidator((topic, message) => bool)` still works for all topics: `false` rejects. See [Validating Messages](doc/2_gossipsub_usage.md#6-validating-messages).
 
 ### Peer Scoring
 
+Peer scoring is on by default. A peer that delivers a message that validation rejects gets a penalty of `invalidMessageDeliveriesWeight * counter^2` on the topic (default weight `-1.0`; the counter decays to zero in about 1 hour). Tune it for your application:
+
 ```dart
-// Configure peer scoring parameters
 final scoreParams = PeerScoreParams(
-  behaviourPenaltyWeight: -10.0,
-  behaviourPenaltyDecay: 0.99,
-  behaviourPenaltyThreshold: -100.0,
+  defaultTopicParams: TopicScoreParams(
+    invalidMessageDeliveriesWeight: -10.0,
+    invalidMessageDeliveriesDecay: 0.9987, // per 1 s decayInterval
+  ),
 );
 
 final pubsub = PubSub(host, router, scoreParams: scoreParams);
 ```
+
+See [Configuration](doc/5_configuration.md#invalid-message-penalty-p3b).
 
 ## Documentation
 

@@ -10,7 +10,6 @@ import 'package:dart_libp2p_pubsub/src/pb/rpc.pb.dart' as pb; // For RPC message
 import 'package:dart_libp2p_pubsub/src/core/topic.dart'; // For Topic
 import 'package:dart_libp2p_pubsub/src/core/message.dart'; // For PubSubMessage
 import 'package:dart_libp2p_pubsub/src/util/midgen.dart'; // For defaultMessageIdFn
-import 'package:dart_libp2p_pubsub/src/core/validation.dart'; // For ValidationResult
 import 'package:dart_libp2p_pubsub/src/gossipsub/score.dart'; // For PeerScore
 import 'package:dart_libp2p_pubsub/src/gossipsub/score_params.dart'; // For PeerScoreParams
 import 'package:dart_libp2p/core/host/host.dart';
@@ -950,7 +949,7 @@ void main() {
              reason: "DELIVER_MESSAGE or SEND_RPC trace found for duplicate processing. Unexpected traces: ${unexpectedTraces.map((t)=>t.type).toList()}");
       });
 
-      test('should drop message and trace REJECT_MESSAGE if validation fails', () async {
+      test('should drop a rejected message, penalise the sender, and not validate its duplicates', () async {
         // 1. Setup: Join topic, add mesh peers
         await router.join(testTopic);
         router.mesh[testTopicName]!.add(mockSendingPeer); // Sending peer is in our mesh
@@ -959,9 +958,13 @@ void main() {
         when(mockOtherMeshPeer.toBytes()).thenReturn(Uint8List.fromList([60,1,4])); // Unique bytes
         when(mockOtherMeshPeer.toBase58()).thenReturn('QmOtherMeshPeerForReject');
         router.mesh[testTopicName]!.add(mockOtherMeshPeer);
-        
+
         when(mockPubsub.getPeerScore(any)).thenReturn(0.0); // Scores are fine
         when(mockPubsub.messageIdFn).thenReturn(defaultMessageIdFn);
+        final senderScore = PeerScore(mockSendingPeer, PeerScoreParams.defaultParams);
+        final otherScore = PeerScore(mockOtherMeshPeer, PeerScoreParams.defaultParams);
+        when(mockPubsub.getPeerScoreObject(mockSendingPeer)).thenReturn(senderScore);
+        when(mockPubsub.getPeerScoreObject(mockOtherMeshPeer)).thenReturn(otherScore);
 
         // Stub validateMessage to REJECT
         when(mockPubsub.validateMessage(any)).thenAnswer((_) async => ValidationResult.reject);
@@ -973,43 +976,66 @@ void main() {
         when(mockComms.sendRpc(any, any, any)).thenAnswer((_) async {
           fail('sendRpc should not be called for a rejected message');
         });
-        
+
         clearInteractions(mockTracer); // Clear previous traces
         when(mockTracer.trace(any)).thenAnswer((_) => {}); // Re-stub general trace
 
         // 2. Action: Handle incoming RPC with the message
-        await router.handleRpc(mockSendingPeer, incomingRpc);
+        final accepted = await router.handleRpc(mockSendingPeer, incomingRpc);
 
         // 3. Verification
-        // Verify REJECT_MESSAGE trace
-        final capturedTraces = verify(mockTracer.trace(captureAny)).captured.cast<trace_pb.TraceEvent>();
-        
-        final List<trace_pb.TraceEvent> rejectEventTraces = capturedTraces.where(
-          (t) => t.type == trace_pb.TraceEvent_Type.REJECT_MESSAGE
-        ).toList();
+        expect(accepted, isEmpty);
+        verify(mockPubsub.validateMessage(any)).called(1);
+        // The delivering peer is penalised on the topic.
+        expect(senderScore.topicStats[testTopicName]?.invalidMessageDeliveries, 1);
+        expect(senderScore.score, lessThan(0));
 
-        expect(rejectEventTraces, isNotEmpty, reason: "REJECT_MESSAGE trace not found. Traces: ${capturedTraces.map((e)=>e.type).toList()}");
-        
-        final trace_pb.TraceEvent rejectTrace = rejectEventTraces.first;
-        expect(rejectTrace.rejectMessage.messageID, orderedEquals(Uint8List.fromList(incomingMessageId.codeUnits)));
-        expect(rejectTrace.rejectMessage.receivedFrom, orderedEquals(mockSendingPeer.toBytes()));
-        // expect(rejectTrace.rejectMessage.reason, equals('validation_failed')); // Or similar, depending on actual implementation detail
-
-        // Verify message was NOT delivered locally
+        // Verify message was NOT delivered locally or forwarded
         verifyNever(mockPubsub.deliverMessage(any));
-
-        // Verify message was NOT forwarded
         verifyNever(mockComms.sendRpc(any, any, any));
 
-        // Verify no DELIVER_MESSAGE or SEND_RPC (for forwarding) traces
-        final unexpectedTraces = capturedTraces.where((t) => 
-            t.type != trace_pb.TraceEvent_Type.RECV_RPC && 
-            t.type != trace_pb.TraceEvent_Type.REJECT_MESSAGE &&
-            (t.type == trace_pb.TraceEvent_Type.DELIVER_MESSAGE || t.type == trace_pb.TraceEvent_Type.SEND_RPC)
+        // PubSub.validateMessage traces REJECT_MESSAGE with the reason; the
+        // router traces no DELIVER_MESSAGE or SEND_RPC for the message.
+        final capturedTraces = verify(mockTracer.trace(captureAny)).captured.cast<trace_pb.TraceEvent>();
+        final unexpectedTraces = capturedTraces.where((t) =>
+            t.type == trace_pb.TraceEvent_Type.DELIVER_MESSAGE || t.type == trace_pb.TraceEvent_Type.SEND_RPC
         ).toList();
-
-        expect(unexpectedTraces, isEmpty, 
+        expect(unexpectedTraces, isEmpty,
              reason: "DELIVER_MESSAGE or SEND_RPC trace found for rejected message. Unexpected traces: ${unexpectedTraces.map((t)=>t.type).toList()}");
+
+        // 4. A duplicate of the rejected message from another peer is not
+        // validated again, and that peer is penalised too.
+        clearInteractions(mockTracer);
+        when(mockTracer.trace(any)).thenAnswer((_) => {});
+        final acceptedDup = await router.handleRpc(mockOtherMeshPeer, incomingRpc);
+        expect(acceptedDup, isEmpty);
+        verifyNever(mockPubsub.validateMessage(any));
+        expect(otherScore.topicStats[testTopicName]?.invalidMessageDeliveries, 1);
+        final dupTraces = verify(mockTracer.trace(captureAny)).captured.cast<trace_pb.TraceEvent>();
+        expect(dupTraces.where((t) => t.type == trace_pb.TraceEvent_Type.DUPLICATE_MESSAGE), isNotEmpty);
+      });
+
+      test('should drop an ignored message without penalising the sender', () async {
+        await router.join(testTopic);
+        router.mesh[testTopicName]!.add(mockSendingPeer);
+        final mockOtherMeshPeer = MockPeerId();
+        when(mockOtherMeshPeer.toBytes()).thenReturn(Uint8List.fromList([60,1,5]));
+        when(mockOtherMeshPeer.toBase58()).thenReturn('QmOtherMeshPeerForIgnore');
+        router.mesh[testTopicName]!.add(mockOtherMeshPeer);
+
+        final senderScore = PeerScore(mockSendingPeer, PeerScoreParams.defaultParams);
+        when(mockPubsub.getPeerScoreObject(any)).thenReturn(senderScore);
+        when(mockPubsub.validateMessage(any)).thenAnswer((_) async => ValidationResult.ignore);
+        when(mockComms.sendRpc(any, any, any)).thenAnswer((_) async {
+          fail('sendRpc should not be called for an ignored message');
+        });
+
+        final accepted = await router.handleRpc(mockSendingPeer, incomingRpc);
+
+        expect(accepted, isEmpty);
+        expect(senderScore.topicStats[testTopicName]?.invalidMessageDeliveries ?? 0, 0);
+        expect(senderScore.score, 0.0);
+        verifyNever(mockComms.sendRpc(any, any, any));
       });
     });
 

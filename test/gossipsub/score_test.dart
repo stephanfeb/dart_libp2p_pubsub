@@ -237,6 +237,84 @@ void main() {
 
     // TODO: Add tests for P1 cap grace period
     // TODO: Add tests for P2 (mesh message deliveries) activation window and decay
+    group('P3b invalid message deliveries', () {
+      test('default weight and decay are set and negative', () {
+        final t = PeerScoreParams.defaultParams.defaultTopicParams;
+        expect(t.invalidMessageDeliveriesWeight, defaultInvalidMessageDeliveriesWeight);
+        expect(t.invalidMessageDeliveriesWeight, lessThan(0));
+        expect(t.invalidMessageDeliveriesDecay, defaultInvalidMessageDeliveriesDecay);
+        expect(t.invalidMessageDeliveriesDecay, inExclusiveRange(0, 1));
+      });
+
+      test('penalty is weight * counter^2 and applies at once', () {
+        final localPeerScore = PeerScore(peerId, params);
+        localPeerScore.recordInvalidMessage('t');
+        expect(localPeerScore.score, closeTo(-1.0, 1e-9));
+        localPeerScore.recordInvalidMessage('t');
+        expect(localPeerScore.score, closeTo(-4.0, 1e-9));
+      });
+
+      test('counter decays each decay interval and is zeroed below decayToZero', () async {
+        final localTestPeerId = await PeerId.random();
+        fakeAsync((fa) {
+          final testParams = PeerScoreParams(
+            defaultTopicParams: const TopicScoreParams(
+              invalidMessageDeliveriesWeight: -2.0,
+              invalidMessageDeliveriesDecay: 0.5,
+            ),
+            scoreDecay: 0.9,
+            decayInterval: const Duration(seconds: 1),
+            decayToZero: 0.1,
+          );
+          final s = PeerScore(localTestPeerId, testParams, clock: clk.clock);
+          const topic = 'decay-topic';
+          s.recordInvalidMessage(topic);
+          s.recordInvalidMessage(topic);
+          expect(s.topicStats[topic]!.decayedInvalidMessageDeliveries, 2.0);
+          expect(s.score, closeTo(-8.0, 1e-9)); // -2 * 2^2
+
+          // A refresh in the same interval does not decay or accumulate.
+          s.refreshScore();
+          expect(s.score, closeTo(-8.0, 1e-9));
+
+          fa.elapse(const Duration(seconds: 1));
+          s.refreshScore();
+          expect(s.topicStats[topic]!.decayedInvalidMessageDeliveries, closeTo(1.0, 1e-9));
+          expect(s.score, closeTo(-2.0, 1e-9)); // -2 * 1^2, not accumulated
+          // The per-refresh counter is reset; the decayed counter is not.
+          expect(s.topicStats[topic]!.invalidMessageDeliveries, 0);
+
+          fa.elapse(const Duration(seconds: 2));
+          s.refreshScore();
+          expect(s.topicStats[topic]!.decayedInvalidMessageDeliveries, closeTo(0.25, 1e-9));
+          expect(s.score, closeTo(-0.125, 1e-9));
+
+          fa.elapse(const Duration(seconds: 2)); // 0.0625 < decayToZero
+          s.refreshScore();
+          expect(s.topicStats[topic]!.decayedInvalidMessageDeliveries, 0);
+          expect(s.score, 0);
+        });
+      });
+
+      test('weight 0 turns the penalty off', () {
+        final s = PeerScore(peerId, PeerScoreParams(
+            defaultTopicParams: const TopicScoreParams(invalidMessageDeliveriesWeight: 0)));
+        s.recordInvalidMessage('t');
+        s.refreshScore();
+        expect(s.score, 0);
+      });
+
+      test('penalty respects scoreMin', () {
+        final s = PeerScore(peerId, PeerScoreParams(scoreMin: -10));
+        for (var i = 0; i < 5; i++) {
+          s.recordInvalidMessage('t'); // -25 without the floor
+        }
+        expect(s.score, -10);
+        s.refreshScore();
+        expect(s.score, -10);
+      });
+    });
+
     // TODO: Add tests for P3a (first message deliveries) decay
     // TODO: Add tests for P6 (behavioural penalty) decay and cap
     // TODO: Add tests for scoreMin/scoreMax caps

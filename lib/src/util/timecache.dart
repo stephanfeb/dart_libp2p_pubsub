@@ -65,16 +65,16 @@ class FirstSeenCache<K> {
   }
 
   /// Removes expired entries from the cache.
+  ///
+  /// Entries are kept in the order they were added, which is also the order
+  /// of their timestamps, so the scan stops at the first entry that has not
+  /// expired.
   void _gc() {
     final now = DateTime.now();
-    final List<K> toRemove = [];
-    _entries.forEach((key, timestamp) {
-      if (now.difference(timestamp) > _ttl) {
-        toRemove.add(key);
-      }
-    });
-    for (final key in toRemove) {
-      _entries.remove(key);
+    while (_entries.isNotEmpty) {
+      final oldestKey = _entries.keys.first;
+      if (now.difference(_entries[oldestKey]!) <= _ttl) break;
+      _entries.remove(oldestKey);
     }
   }
 

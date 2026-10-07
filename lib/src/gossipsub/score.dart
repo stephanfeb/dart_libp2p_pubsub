@@ -1,3 +1,5 @@
+import 'dart:math' show pow;
+
 import 'package:dart_libp2p/core/peer/peer_id.dart';
 import 'package:clock/clock.dart';
 import 'score_params.dart'; // Import the actual PeerScoreParams
@@ -33,8 +35,18 @@ class TopicScoreStats {
   /// Counter for mesh message delivery failures from this peer in this topic (P2 penalty).
   int meshFailurePenalty = 0;
 
-  /// Counter for invalid messages received from this peer in this topic (P3b penalty).
+  /// Counter for invalid messages received from this peer in this topic
+  /// since the last [PeerScore.refreshScore]. It is reset at each refresh;
+  /// the P3b penalty uses [decayedInvalidMessageDeliveries].
   int invalidMessageDeliveries = 0;
+
+  /// The P3b counter, as `invalidMessageDeliveries` in go-libp2p-pubsub.
+  /// Each invalid message adds 1. At each decay interval the counter is
+  /// multiplied by [TopicScoreParams.invalidMessageDeliveriesDecay] and set
+  /// to 0 when it falls below [PeerScoreParams.decayToZero]. The P3b penalty
+  /// is `invalidMessageDeliveriesWeight * counter^2`. Not reset by
+  /// [resetCounters].
+  double decayedInvalidMessageDeliveries = 0.0;
 
   /// Timestamp of the last successful message delivery from this peer in this topic.
   /// Used to check against [PeerScoreParams.TopicScoreParams.topicWeightCapGracePeriod] for P1 cap.
@@ -92,6 +104,12 @@ class PeerScore {
   /// Clock to use for time-sensitive operations.
   final Clock _clock;
 
+  /// The P3b penalty that is currently included in [score]. P3b is not
+  /// accumulated like the other components: it is computed again from the
+  /// decayed counters each time, so it is removed from [score] before the
+  /// score is decayed and then added again.
+  double _appliedInvalidPenalty = 0.0;
+
   // TODO: Review remaining fields from go-libp2p-pubsub/score.go PeerStats:
   // - firstMessageDeliveries: Now in TopicScoreStats.
   // - meshMessageDeliveries: Now in TopicScoreStats.
@@ -117,6 +135,11 @@ class PeerScore {
   void refreshScore() {
     final now = _clock.now();
     double currentRawScore = 0;
+
+    // Take out the P3b penalty of the previous refresh; it is computed again
+    // below from the decayed counters.
+    score -= _appliedInvalidPenalty;
+    _appliedInvalidPenalty = 0.0;
 
     // Apply score decay
     final timeSinceLastUpdate = now.difference(lastUpdated);
@@ -144,6 +167,7 @@ class PeerScore {
     }
 
     double topicScoresTotal = 0;
+    double invalidPenaltyTotal = 0;
 
     // P1-P4: Topic-based scores
     for (final topicEntry in topicStats.entries) {
@@ -227,12 +251,18 @@ class PeerScore {
       // if decay is < 1.0. Typically this counter is reset periodically.
       currentTopicScore += p4Score;
       
-      // P4 / P3b Penalty: Invalid Message Deliveries Penalty (per topic)
-      // Penalty for sending invalid messages on this topic.
-      double p3bScore = tStats.invalidMessageDeliveries * tParams.invalidMessageDeliveriesWeight;
-      // TODO: Apply tParams.invalidMessageDeliveriesDecay to tStats.invalidMessageDeliveries counter
-      // if decay is < 1.0. Typically this counter is reset periodically.
-      currentTopicScore += p3bScore;
+      // P3b: Invalid Message Deliveries Penalty (per topic), as in
+      // go-libp2p-pubsub: the counter decays once per decay interval and the
+      // penalty is weight * counter^2. It is kept out of the accumulated
+      // score (see _appliedInvalidPenalty).
+      if (numIntervals > 0 && tStats.decayedInvalidMessageDeliveries > 0) {
+        tStats.decayedInvalidMessageDeliveries *=
+            pow(tParams.invalidMessageDeliveriesDecay, numIntervals);
+        if (tStats.decayedInvalidMessageDeliveries < params.decayToZero) {
+          tStats.decayedInvalidMessageDeliveries = 0;
+        }
+      }
+      invalidPenaltyTotal += _invalidPenaltyFor(tStats, tParams);
       
       topicScoresTotal += currentTopicScore;
     }
@@ -271,11 +301,10 @@ class PeerScore {
 
 
     // Apply score caps and floors
-    if (score > params.scoreMax) {
-      score = params.scoreMax;
-    } else if (score < params.scoreMin) {
-      score = params.scoreMin;
-    }
+    score = _clampScore(score);
+
+    // P3b: add the current invalid-message penalty.
+    _applyInvalidPenalty(invalidPenaltyTotal);
 
     // Update graylist status
     if (score < params.graylistThreshold) {
@@ -314,6 +343,25 @@ class PeerScore {
     // `behaviourPenalty` counter decay is handled within P6 calculation.
 
     _log.fine('PeerScore (${peerId.toBase58()}): Refreshed score. Current: $score, LastUpdated: $lastUpdated');
+  }
+
+  double _clampScore(double value) {
+    if (value > params.scoreMax) return params.scoreMax;
+    if (value < params.scoreMin) return params.scoreMin;
+    return value;
+  }
+
+  double _invalidPenaltyFor(TopicScoreStats tStats, TopicScoreParams tParams) {
+    final counter = tStats.decayedInvalidMessageDeliveries;
+    return tParams.invalidMessageDeliveriesWeight * counter * counter;
+  }
+
+  /// Replaces the P3b penalty in [score] with [penalty], within the score
+  /// caps.
+  void _applyInvalidPenalty(double penalty) {
+    final base = score - _appliedInvalidPenalty;
+    score = _clampScore(base + penalty);
+    _appliedInvalidPenalty = score - base;
   }
 
   /// Adds a penalty for misbehavior.
@@ -413,11 +461,22 @@ class PeerScore {
     stats.meshFailurePenalty++;
   }
 
-  /// Records an invalid message received from this peer. (P3b penalty & P6)
+  /// Records an invalid message received from this peer on [topic] (P3b).
+  ///
+  /// The P3b penalty takes effect in [score] at once; it then decays at each
+  /// [refreshScore].
   void recordInvalidMessage(String topic) {
     final stats = _getOrAddTopicStats(topic);
     stats.invalidMessageDeliveries++;
-    invalidMessageDeliveries++; // Global counter for P6
+    stats.decayedInvalidMessageDeliveries += 1;
+    invalidMessageDeliveries++; // Global lifetime counter
+
+    // Apply the new P3b penalty now, without decay; refreshScore() decays it.
+    double penalty = 0;
+    for (final entry in topicStats.entries) {
+      penalty += _invalidPenaltyFor(entry.value, params.getTopicParams(entry.key));
+    }
+    _applyInvalidPenalty(penalty);
   }
 
   /// Resets counters that are subject to decay or periodic refresh.

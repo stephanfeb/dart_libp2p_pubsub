@@ -24,20 +24,73 @@ import '../gossipsub/score_params.dart'; // For PeerScoreParams
 import '../util/midgen.dart';
 import 'package:logging/logging.dart';
 
+export 'validation.dart' show ValidationResult;
+
 final _log = Logger('PubSub');
 
 // TODO: Define Message class to be used in Subscription and PubSub
 // import 'message.dart'; // Or from pb/rpc.pb.dart // This is redundant now
 
-/// Type definition for a message validator function.
+/// A legacy, synchronous message validator that applies to every topic.
 ///
-/// A validator function takes a topic string and a message (likely a `Message`
-/// object once defined, using `dynamic` for now) and returns a `ValidationResult`
-/// (enum or class to be defined, using `bool` as a placeholder for now,
-/// where `true` means valid).
+/// It takes the topic string and the received message (a [PubSubMessage]).
+/// It returns `true` to accept the message and `false` to reject it. A
+/// rejected message is not forwarded or delivered, and the peer that sent it
+/// is penalised. Register it with [PubSub.registerMessageValidator].
 ///
-/// TODO: Define Message class and ValidationResult enum/class.
+/// Prefer [TopicValidator] for new code: it can be async and it can return
+/// [ValidationResult.ignore].
 typedef MessageValidator = bool Function(String topic, dynamic message);
+
+/// A validator for the messages of one topic, as in go-libp2p-pubsub's
+/// `RegisterTopicValidator`.
+///
+/// [receivedFrom] is the peer that delivered the message to us (the local
+/// host's ID for a message we publish). The original author is
+/// `message.from`.
+///
+/// The validator returns (or completes with):
+/// - [ValidationResult.accept]: the message is forwarded and delivered.
+/// - [ValidationResult.reject]: the message is dropped and the delivering
+///   peer is penalised. Use this only for messages that are invalid.
+/// - [ValidationResult.ignore]: the message is dropped without a penalty.
+///   Use this for messages that are valid but not wanted (for example,
+///   stale or not relevant to this node).
+///
+/// A validator that throws is treated as [ValidationResult.ignore].
+typedef TopicValidator = FutureOr<ValidationResult> Function(
+    PeerId receivedFrom, PubSubMessage message);
+
+/// The default time limit for one run of a [TopicValidator]. A validator that
+/// does not complete in time gives [ValidationResult.ignore].
+const Duration defaultValidatorTimeout = Duration(seconds: 5);
+
+/// The default maximum number of messages that can be in validation at the
+/// same time, over all topics (as `defaultValidateThrottle` in
+/// go-libp2p-pubsub). More messages are dropped as
+/// [ValidationResult.ignore].
+const int defaultValidateThrottle = 8192;
+
+/// The default maximum number of concurrent runs of one topic's
+/// [TopicValidator] (as `defaultValidateConcurrency` in go-libp2p-pubsub).
+const int defaultValidatorConcurrency = 1024;
+
+/// Trace reasons for dropped messages, as in go-libp2p-pubsub.
+const String _rejectInvalidStructure = 'invalid message';
+const String _rejectInvalidSignature = 'invalid signature';
+const String _rejectValidationFailed = 'validation failed';
+const String _rejectValidationIgnored = 'validation ignored';
+const String _rejectValidationThrottled = 'validation throttled';
+const String _rejectValidationTimeout = 'validation timeout';
+
+class _TopicValidatorEntry {
+  final TopicValidator validator;
+  final Duration timeout;
+  final int concurrency;
+  int active = 0;
+
+  _TopicValidatorEntry(this.validator, this.timeout, this.concurrency);
+}
 
 /// The main class for PubSub operations.
 ///
@@ -48,6 +101,15 @@ class PubSub {
   final Router router;
   final EventTracer tracer;
   final PeerScoreParams scoreParams;
+
+  /// The default time limit for one run of a [TopicValidator].
+  /// [Duration.zero] means no limit.
+  final Duration validatorTimeout;
+
+  /// The maximum number of messages in validation at the same time, over
+  /// all topics.
+  final int validateThrottle;
+
   final PrivateKey? _privateKey; // For signing outgoing messages
   late final PubSubProtocol _comms;
   late final MessageIdGenerator _idGenerator; // For generating sequence numbers
@@ -63,8 +125,20 @@ class PubSub {
   /// private key from its peerstore when [privateKey] is omitted. A message's
   /// `from` is always the host's peer ID, so [privateKey] must be the host's
   /// key; peers reject a signature from any other key.
+  ///
+  /// [validatorTimeout] is the default time limit for one run of a
+  /// [TopicValidator] (see [registerTopicValidator]); [Duration.zero] means
+  /// no limit. [validateThrottle] is the maximum number of messages in
+  /// validation at the same time, over all topics; when it is reached, new
+  /// messages are dropped as [ValidationResult.ignore].
   // TODO: Consider making PubSub an async initializable class if attach needs to be awaited.
-  PubSub(this.host, this.router, {PrivateKey? privateKey, EventTracer? tracer, PeerScoreParams? scoreParams}) :
+  PubSub(this.host, this.router, {
+    PrivateKey? privateKey,
+    EventTracer? tracer,
+    PeerScoreParams? scoreParams,
+    this.validatorTimeout = defaultValidatorTimeout,
+    this.validateThrottle = defaultValidateThrottle,
+  }) :
     _privateKey = privateKey,
     this.tracer = tracer ?? const NoOpEventTracer(),
     this.scoreParams = scoreParams ?? PeerScoreParams.defaultParams,
@@ -203,30 +277,168 @@ class PubSub {
   // --- Message Validation ---
 
   final List<MessageValidator> _validators = [];
+  final Map<String, _TopicValidatorEntry> _topicValidators = {};
+  int _activeValidations = 0;
 
-  /// Registers a message validator.
+  /// Registers a legacy validator that applies to every topic.
   ///
-  /// Validators are called in order of registration. If any validator
-  /// marks a message as invalid, subsequent validators are not called.
+  /// Validators are called in order of registration, after the built-in
+  /// structure and signature checks and before the topic's
+  /// [TopicValidator]. If any validator returns `false`, the message is
+  /// rejected: it is not forwarded or delivered, the peer that sent it is
+  /// penalised, and subsequent validators are not called.
   void registerMessageValidator(MessageValidator validator) {
     _validators.add(validator);
   }
 
-  /// Internal method to validate a message.
+  /// Registers [validator] for the messages on [topic], as
+  /// `RegisterTopicValidator` in go-libp2p-pubsub.
   ///
-  /// TODO: Implement fully. This will iterate through _validators.
-  /// For now, it's a placeholder.
-  // TODO: Update _validateMessage to use PubSubMessage and return ValidationResult
-  // This method might be better placed in validation.dart or called from there.
-  // For now, keeping the old signature but acknowledging it needs update.
-  // bool _validateMessage(String topic, dynamic data) { ... old implementation ... }
+  /// The validator runs for every new message on [topic], both received and
+  /// published locally. Messages are forwarded to other peers and delivered
+  /// to subscribers only when it accepts them. Duplicates of a message that
+  /// was already seen are dropped before validation, so the validator runs
+  /// once per message.
+  ///
+  /// [timeout] limits one run of the validator (default: the PubSub's
+  /// [validatorTimeout]; [Duration.zero] means no limit). A run that takes
+  /// longer gives [ValidationResult.ignore]. [concurrency] limits how many
+  /// runs of this validator can be active at the same time (default
+  /// [defaultValidatorConcurrency]); more messages are dropped as
+  /// [ValidationResult.ignore].
+  ///
+  /// Only one validator can be registered for a topic. Throws a [StateError]
+  /// if [topic] already has one; call [unregisterTopicValidator] first.
+  void registerTopicValidator(
+    String topic,
+    TopicValidator validator, {
+    Duration? timeout,
+    int? concurrency,
+  }) {
+    if (_topicValidators.containsKey(topic)) {
+      throw StateError('PubSub: a validator is already registered for topic "$topic"');
+    }
+    final effectiveConcurrency = concurrency ?? defaultValidatorConcurrency;
+    if (effectiveConcurrency < 1) {
+      throw ArgumentError.value(concurrency, 'concurrency', 'must be at least 1');
+    }
+    _topicValidators[topic] = _TopicValidatorEntry(
+        validator, timeout ?? validatorTimeout, effectiveConcurrency);
+  }
 
-  /// Validates an incoming message using the registered validators and built-in checks.
-  /// This is expected to be called by the Router.
+  /// Removes the validator of [topic], as `UnregisterTopicValidator` in
+  /// go-libp2p-pubsub. Returns `false` if [topic] had no validator.
+  bool unregisterTopicValidator(String topic) {
+    return _topicValidators.remove(topic) != null;
+  }
+
+  /// Validates a message. The router calls this for each new message it
+  /// receives, and [publish] calls it for each local message.
+  ///
+  /// The checks run in this order: the global throttle
+  /// ([validateThrottle]), message structure and size, the signature, the
+  /// validators of [registerMessageValidator], and the topic's
+  /// [TopicValidator]. The first result that is not
+  /// [ValidationResult.accept] is returned. A dropped message that was
+  /// received from a peer is traced as REJECT_MESSAGE with the reason.
   Future<ValidationResult> validateMessage(PubSubMessage message) async {
-    // TODO: Integrate custom _validators if their signature is updated to PubSubMessage -> ValidationResult
-    // For now, relies on validateFullMessage which includes structural and signature checks.
-    return await validateFullMessage(message);
+    if (_activeValidations >= validateThrottle) {
+      _log.fine('PubSub: validation throttled ($validateThrottle active); dropping message on "${message.topic}".');
+      _traceReject(message, _rejectValidationThrottled);
+      return ValidationResult.ignore;
+    }
+    _activeValidations++;
+    try {
+      final (result, reason) = await _runValidation(message);
+      if (result != ValidationResult.accept) {
+        _traceReject(message, reason!);
+      }
+      return result;
+    } finally {
+      _activeValidations--;
+    }
+  }
+
+  Future<(ValidationResult, String?)> _runValidation(PubSubMessage message) async {
+    if (validateMessageStructure(message) != ValidationResult.accept) {
+      return (ValidationResult.reject, _rejectInvalidStructure);
+    }
+    ValidationResult signatureResult;
+    try {
+      signatureResult = await validateMessageSignature(message);
+    } catch (e) {
+      // For example, a 'from' field that is not a valid peer ID.
+      _log.fine('PubSub: signature check failed with an error: $e');
+      signatureResult = ValidationResult.reject;
+    }
+    if (signatureResult != ValidationResult.accept) {
+      return (ValidationResult.reject, _rejectInvalidSignature);
+    }
+
+    final topic = message.topic;
+    for (final validator in List<MessageValidator>.from(_validators)) {
+      try {
+        if (!validator(topic, message)) {
+          return (ValidationResult.reject, _rejectValidationFailed);
+        }
+      } catch (e, s) {
+        _log.warning('PubSub: message validator threw on topic "$topic": $e\n$s');
+        return (ValidationResult.ignore, _rejectValidationIgnored);
+      }
+    }
+
+    final entry = _topicValidators[topic];
+    if (entry == null) {
+      return (ValidationResult.accept, null);
+    }
+    if (entry.active >= entry.concurrency) {
+      _log.fine('PubSub: validator for "$topic" throttled (${entry.concurrency} active); dropping message.');
+      return (ValidationResult.ignore, _rejectValidationThrottled);
+    }
+    entry.active++;
+    try {
+      var timedOut = false;
+      var future = Future<ValidationResult>.sync(
+          () => entry.validator(message.receivedFrom ?? host.id, message));
+      if (entry.timeout > Duration.zero) {
+        future = future.timeout(entry.timeout, onTimeout: () {
+          timedOut = true;
+          return ValidationResult.ignore;
+        });
+      }
+      final result = await future;
+      if (timedOut) {
+        _log.fine('PubSub: validator for "$topic" timed out after ${entry.timeout}; ignoring message.');
+        return (ValidationResult.ignore, _rejectValidationTimeout);
+      }
+      switch (result) {
+        case ValidationResult.accept:
+          return (ValidationResult.accept, null);
+        case ValidationResult.reject:
+          return (ValidationResult.reject, _rejectValidationFailed);
+        case ValidationResult.ignore:
+          return (ValidationResult.ignore, _rejectValidationIgnored);
+      }
+    } catch (e, s) {
+      _log.warning('PubSub: validator for topic "$topic" threw: $e\n$s');
+      return (ValidationResult.ignore, _rejectValidationIgnored);
+    } finally {
+      entry.active--;
+    }
+  }
+
+  void _traceReject(PubSubMessage message, String reason) {
+    final from = message.receivedFrom;
+    if (from == null) return; // Local publish: publish() logs the drop.
+    final rejectTrace = trace_pb.TraceEvent_RejectMessage()
+      ..messageID = messageIdFn(message.rpcMessage).codeUnits
+      ..receivedFrom = from.toBytes()
+      ..topic = message.topic
+      ..reason = reason;
+    tracer.trace(trace_pb.TraceEvent()
+      ..type = trace_pb.TraceEvent_Type.REJECT_MESSAGE
+      ..peerID = from.toBytes()
+      ..rejectMessage = rejectTrace);
   }
 
   // --- Message Publishing ---
@@ -269,9 +481,11 @@ class PubSub {
       receivedFrom: null, // Locally published, so receivedFrom is null
     );
 
-    // Validate the constructed PubSubMessage
-    if (await validateMessage(pubSubMessage) != ValidationResult.accept) {
-      _log.warning('PubSub: Constructed message for topic "$topic" is invalid. Dropping.');
+    // Validate the constructed PubSubMessage, with the same validators as
+    // received messages.
+    final validation = await validateMessage(pubSubMessage);
+    if (validation != ValidationResult.accept) {
+      _log.warning('PubSub: Message for topic "$topic" failed local validation ($validation). Dropping.');
       // Optionally, trace a REJECT_MESSAGE or similar event here if desired for local drops
       return;
     }

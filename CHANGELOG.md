@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+### Fixed
+- **The application could not control which messages a node relays.** `registerMessageValidator` stored validators that nothing called, and the router forwarded every message with a valid signature to its mesh before the application saw it. Validation now runs before forwarding and delivery: a message is forwarded to the mesh and delivered to subscribers only when it is accepted. `registerMessageValidator((topic, message) => bool)` now works for all topics: `true` accepts and `false` rejects.
+- **Duplicates were validated again.** The router verified the signature of each copy of a message before its duplicate check. The duplicate check is now first, and a message is marked seen before validation, whatever the result, so each message is validated once. The seen cache keeps message IDs for `GossipSubParams.seenMessagesTTL` (2 minutes, as in go-libp2p-pubsub), not only for the 5-second message-cache window.
+- **Rejected messages cost the sender nothing.** The router treated reject and ignore alike, and the invalid-message penalty (P3b) had weight 0 and no decay. Now a rejected message penalises the peer that delivered it (not the author) on the topic; ignore gives no penalty. A peer that sends a copy of a rejected message is penalised too. P3b follows go-libp2p-pubsub: the penalty is `invalidMessageDeliveriesWeight * counter^2`, it applies at once, and the counter decays by `invalidMessageDeliveriesDecay` per `decayInterval` and is set to 0 below `decayToZero`.
+
+### Added
+- `PubSub.registerTopicValidator(topic, validator, {timeout, concurrency})` and `PubSub.unregisterTopicValidator(topic)`, as in go-libp2p-pubsub. A `TopicValidator` can be async and returns `ValidationResult.accept`, `reject` or `ignore`. A run that takes longer than `timeout` gives `ignore`; when more than `concurrency` runs (default 1024) are active for the topic, new messages are dropped as `ignore`. A validator that throws gives `ignore`.
+- `PubSub` constructor arguments `validatorTimeout` (default 5 s; `Duration.zero` means no limit) and `validateThrottle` (default 8192 concurrent validations, as in go-libp2p-pubsub; more messages are dropped as `ignore`).
+- `GossipSubParams.seenMessagesTTL` (default 2 minutes).
+- `TopicScoreStats.decayedInvalidMessageDeliveries`, the decayed P3b counter.
+- `ValidationResult`, `PeerScoreParams` and `TopicScoreParams` are now exported from `package:dart_libp2p_pubsub/dart_libp2p_pubsub.dart`.
+- Dropped messages are traced as `REJECT_MESSAGE` with go-libp2p-pubsub's reasons (`validation failed`, `validation ignored`, `validation throttled`, `invalid signature`, plus `validation timeout` and `invalid message`).
+
+### Changed
+- **`invalidMessageDeliveriesWeight` now defaults to -1.0 and `invalidMessageDeliveriesDecay` to 0.9987** (was 0 and 1.0). 1 rejected message gives -1, 2 give -4, 10 give -100 (the default `graylistThreshold`); with the default 1 s `decayInterval`, the counter for one message decays to zero in about 1 hour. Applications should tune these values (see doc/5_configuration.md). Set the weight to 0 to keep the old behaviour.
+- Validators registered with `registerMessageValidator` now also run on messages that the node publishes, as topic validators do. A rejected local message is dropped with a warning.
+- `REJECT_MESSAGE` is now traced by `PubSub.validateMessage`, not by `GossipSubRouter.handleRpc`, and its `reason` is one of the strings above (was `reject` or `ignore`).
+- The messages of one RPC are validated concurrently; the RPC's subscriptions and control messages are handled while validation runs.
+
 ## 1.4.2 - 2026-10-04
 
 ### Fixed

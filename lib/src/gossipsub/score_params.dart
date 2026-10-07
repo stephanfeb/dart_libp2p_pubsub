@@ -1,5 +1,13 @@
 import 'package:dart_libp2p/core/peer/peer_id.dart'; // Needed for AppSpecificScore function type
 
+/// Default [TopicScoreParams.invalidMessageDeliveriesWeight].
+const double defaultInvalidMessageDeliveriesWeight = -1.0;
+
+/// Default [TopicScoreParams.invalidMessageDeliveriesDecay]: the counter
+/// falls from 1 to below the default `decayToZero` (0.01) in about 1 hour
+/// with a 1 s decay interval (0.01^(1/3600) is about 0.99872).
+const double defaultInvalidMessageDeliveriesDecay = 0.9987;
+
 /// Defines parameters for scoring within a specific topic.
 class TopicScoreParams {
   /// Base weight for participating in the topic (P1 component).
@@ -38,9 +46,21 @@ class TopicScoreParams {
   /// Decay factor for mesh failure penalty (P2 penalty).
   final double meshFailurePenaltyDecay;
 
-  /// Penalty for invalid messages in this topic (P3b penalty).
+  /// Weight of the penalty for invalid messages in this topic (P3b). It must
+  /// be negative (or 0 to turn the penalty off). The penalty is
+  /// `weight * counter^2`, where the counter is the number of messages from
+  /// the peer that validation rejected, with decay.
+  ///
+  /// The default is [defaultInvalidMessageDeliveriesWeight] (-1.0): 1
+  /// rejected message gives -1, 2 give -4, 4 give -16, 10 give -100 (the
+  /// default `graylistThreshold`). Applications should tune this for their
+  /// traffic.
   final double invalidMessageDeliveriesWeight;
-  /// Decay factor for invalid message penalty (P3b penalty).
+  /// Decay factor of the P3b counter, applied once per
+  /// [PeerScoreParams.decayInterval]. The default,
+  /// [defaultInvalidMessageDeliveriesDecay] (0.9987), takes the counter for
+  /// one message to zero in about 1 hour with the default 1 s decay
+  /// interval (as `ScoreParameterDecay(time.Hour)` in go-libp2p-pubsub).
   final double invalidMessageDeliveriesDecay;
 
   const TopicScoreParams({
@@ -63,8 +83,8 @@ class TopicScoreParams {
     this.meshFailurePenaltyWeight = 0.0,
     this.meshFailurePenaltyDecay = 1.0, // No decay by default
 
-    this.invalidMessageDeliveriesWeight = 0.0,
-    this.invalidMessageDeliveriesDecay = 1.0, // No decay by default
+    this.invalidMessageDeliveriesWeight = defaultInvalidMessageDeliveriesWeight,
+    this.invalidMessageDeliveriesDecay = defaultInvalidMessageDeliveriesDecay,
   });
 
   static TopicScoreParams get defaultTopicParams => const TopicScoreParams();

@@ -164,9 +164,19 @@ class _FakePeerScoreParams_10 extends _i1.SmartFake
         );
 }
 
-class _FakePubSubProtocol_11 extends _i1.SmartFake
+class _FakeDuration_11 extends _i1.SmartFake implements Duration {
+  _FakeDuration_11(
+    Object parent,
+    Invocation parentInvocation,
+  ) : super(
+          parent,
+          parentInvocation,
+        );
+}
+
+class _FakePubSubProtocol_12 extends _i1.SmartFake
     implements _i13.PubSubProtocol {
-  _FakePubSubProtocol_11(
+  _FakePubSubProtocol_12(
     Object parent,
     Invocation parentInvocation,
   ) : super(
@@ -175,8 +185,8 @@ class _FakePubSubProtocol_11 extends _i1.SmartFake
         );
 }
 
-class _FakeSubscription_12 extends _i1.SmartFake implements _i14.Subscription {
-  _FakeSubscription_12(
+class _FakeSubscription_13 extends _i1.SmartFake implements _i14.Subscription {
+  _FakeSubscription_13(
     Object parent,
     Invocation parentInvocation,
   ) : super(
@@ -185,8 +195,8 @@ class _FakeSubscription_12 extends _i1.SmartFake implements _i14.Subscription {
         );
 }
 
-class _FakeCID_13 extends _i1.SmartFake implements _i15.CID {
-  _FakeCID_13(
+class _FakeCID_14 extends _i1.SmartFake implements _i15.CID {
+  _FakeCID_14(
     Object parent,
     Invocation parentInvocation,
   ) : super(
@@ -195,9 +205,9 @@ class _FakeCID_13 extends _i1.SmartFake implements _i15.CID {
         );
 }
 
-class _FakeResourceManager_14 extends _i1.SmartFake
+class _FakeResourceManager_15 extends _i1.SmartFake
     implements _i16.ResourceManager {
-  _FakeResourceManager_14(
+  _FakeResourceManager_15(
     Object parent,
     Invocation parentInvocation,
   ) : super(
@@ -206,8 +216,8 @@ class _FakeResourceManager_14 extends _i1.SmartFake
         );
 }
 
-class _FakeConn_15 extends _i1.SmartFake implements _i17.Conn {
-  _FakeConn_15(
+class _FakeConn_16 extends _i1.SmartFake implements _i17.Conn {
+  _FakeConn_16(
     Object parent,
     Invocation parentInvocation,
   ) : super(
@@ -216,8 +226,8 @@ class _FakeConn_15 extends _i1.SmartFake implements _i17.Conn {
         );
 }
 
-class _FakeNotifiee_16 extends _i1.SmartFake implements _i18.Notifiee {
-  _FakeNotifiee_16(
+class _FakeNotifiee_17 extends _i1.SmartFake implements _i18.Notifiee {
+  _FakeNotifiee_17(
     Object parent,
     Invocation parentInvocation,
   ) : super(
@@ -447,6 +457,21 @@ class MockPubSub extends _i1.Mock implements _i23.PubSub {
       ) as _i12.PeerScoreParams);
 
   @override
+  Duration get validatorTimeout => (super.noSuchMethod(
+        Invocation.getter(#validatorTimeout),
+        returnValue: _FakeDuration_11(
+          this,
+          Invocation.getter(#validatorTimeout),
+        ),
+      ) as Duration);
+
+  @override
+  int get validateThrottle => (super.noSuchMethod(
+        Invocation.getter(#validateThrottle),
+        returnValue: 0,
+      ) as int);
+
+  @override
   Map<_i2.PeerId, _i24.PeerScore> get peerScores => (super.noSuchMethod(
         Invocation.getter(#peerScores),
         returnValue: <_i2.PeerId, _i24.PeerScore>{},
@@ -455,7 +480,7 @@ class MockPubSub extends _i1.Mock implements _i23.PubSub {
   @override
   _i13.PubSubProtocol get comms => (super.noSuchMethod(
         Invocation.getter(#comms),
-        returnValue: _FakePubSubProtocol_11(
+        returnValue: _FakePubSubProtocol_12(
           this,
           Invocation.getter(#comms),
         ),
@@ -476,7 +501,7 @@ class MockPubSub extends _i1.Mock implements _i23.PubSub {
           #subscribe,
           [topic],
         ),
-        returnValue: _FakeSubscription_12(
+        returnValue: _FakeSubscription_13(
           this,
           Invocation.method(
             #subscribe,
@@ -484,6 +509,15 @@ class MockPubSub extends _i1.Mock implements _i23.PubSub {
           ),
         ),
       ) as _i14.Subscription);
+
+  @override
+  void announceSubscriptionsTo(_i2.PeerId? peerId) => super.noSuchMethod(
+        Invocation.method(
+          #announceSubscriptionsTo,
+          [peerId],
+        ),
+        returnValueForMissingStub: null,
+      );
 
   @override
   _i20.Future<void> unsubscribe(String? topic) => (super.noSuchMethod(
@@ -513,6 +547,37 @@ class MockPubSub extends _i1.Mock implements _i23.PubSub {
         ),
         returnValueForMissingStub: null,
       );
+
+  @override
+  void registerTopicValidator(
+    String? topic,
+    _i23.TopicValidator? validator, {
+    Duration? timeout,
+    int? concurrency,
+  }) =>
+      super.noSuchMethod(
+        Invocation.method(
+          #registerTopicValidator,
+          [
+            topic,
+            validator,
+          ],
+          {
+            #timeout: timeout,
+            #concurrency: concurrency,
+          },
+        ),
+        returnValueForMissingStub: null,
+      );
+
+  @override
+  bool unregisterTopicValidator(String? topic) => (super.noSuchMethod(
+        Invocation.method(
+          #unregisterTopicValidator,
+          [topic],
+        ),
+        returnValue: false,
+      ) as bool);
 
   @override
   _i20.Future<_i28.ValidationResult> validateMessage(
@@ -645,7 +710,7 @@ class MockPeerId extends _i1.Mock implements _i2.PeerId {
           #toCid,
           [],
         ),
-        returnValue: _FakeCID_13(
+        returnValue: _FakeCID_14(
           this,
           Invocation.method(
             #toCid,
@@ -820,6 +885,16 @@ class MockPubSubProtocol extends _i1.Mock implements _i13.PubSubProtocol {
   }
 
   @override
+  set onNewInboundPeer(void Function(_i2.PeerId)? _onNewInboundPeer) =>
+      super.noSuchMethod(
+        Invocation.setter(
+          #onNewInboundPeer,
+          _onNewInboundPeer,
+        ),
+        returnValueForMissingStub: null,
+      );
+
+  @override
   _i20.Future<void> sendRpc(
     _i2.PeerId? peerId,
     _i26.RPC? rpc,
@@ -884,7 +959,7 @@ class MockNetwork extends _i1.Mock implements _i4.Network {
   @override
   _i16.ResourceManager get resourceManager => (super.noSuchMethod(
         Invocation.getter(#resourceManager),
-        returnValue: _FakeResourceManager_14(
+        returnValue: _FakeResourceManager_15(
           this,
           Invocation.getter(#resourceManager),
         ),
@@ -998,7 +1073,7 @@ class MockNetwork extends _i1.Mock implements _i4.Network {
             peerId,
           ],
         ),
-        returnValue: _i20.Future<_i17.Conn>.value(_FakeConn_15(
+        returnValue: _i20.Future<_i17.Conn>.value(_FakeConn_16(
           this,
           Invocation.method(
             #dialPeer,
@@ -1093,7 +1168,7 @@ class MockConnManager extends _i1.Mock implements _i6.ConnManager {
   @override
   _i18.Notifiee get notifiee => (super.noSuchMethod(
         Invocation.getter(#notifiee),
-        returnValue: _FakeNotifiee_16(
+        returnValue: _FakeNotifiee_17(
           this,
           Invocation.getter(#notifiee),
         ),
