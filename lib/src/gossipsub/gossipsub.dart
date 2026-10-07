@@ -549,11 +549,11 @@ class GossipSubRouter implements Router {
       }
     }
 
-    // IHAVE gossip: Announce the message to other good-scoring peers not in the mesh.
+    // IHAVE gossip: Announce the message to other good-scoring peers
+    // subscribed to the topic, not in the mesh.
     final List<PeerId> ihavePeers = [];
-    final allConnectedPeers = _pubsub?.host.network.peers.toList() ?? [];
     
-    for (final peerId in allConnectedPeers) {
+    for (final peerId in _connectedTopicPeers(topicId)) {
       if (peerId == _pubsub?.host.id) continue; // Don't send to self
       if (peerId == message.receivedFrom) continue; // Don't send back to origin
       if (peersToPublish.contains(peerId)) continue; // Already sent full message
@@ -978,8 +978,7 @@ class GossipSubRouter implements Router {
         final needed = params.D - fanoutPeers.length;
         _log.fine('Heartbeat: Fanout for topic $topicId too small (${fanoutPeers.length} < ${params.D}). Need $needed more fanout peers.');
 
-        var potentialFanoutPeers = _pubsub?.host.network.peers.toList() ?? [];
-        potentialFanoutPeers = potentialFanoutPeers.where((peerId) {
+        final potentialFanoutPeers = _connectedTopicPeers(topicId).where((peerId) {
           if (peerId == _pubsub?.host.id) return false;
           if (fanoutPeers.contains(peerId)) return false; // Already in fanout
           if (mesh[topicId]?.contains(peerId) ?? false) return false; // Already in mesh for this topic

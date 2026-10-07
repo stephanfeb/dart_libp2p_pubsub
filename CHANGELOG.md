@@ -8,6 +8,7 @@ All notable changes to this project will be documented in this file.
 - **The heartbeat ran once a minute.** The router ran its heartbeat every `fanoutTTL` (1 minute by default), so a mesh below `DLow` waited up to a minute for new peers. The heartbeat now runs every `GossipSubParams.heartbeatInterval` (1 s), the first one `heartbeatInitialDelay` (100 ms) after `start()`, as in go-libp2p-pubsub.
 - **Subscribing did not build a mesh.** `GossipSubRouter.join` only created an empty mesh, which the next heartbeat filled. It now sends `GRAFT` to up to `D` connected peers with a score of at least `DScore`, as in go-libp2p-pubsub: first the topic's fanout peers, then other peers subscribed to the topic. The topic's fanout is removed.
 - **The heartbeat grafted peers that were not subscribed to the topic.** To fill a mesh below `DLow`, and for opportunistic grafting, the heartbeat picked from all connected peers. It now picks only from connected peers subscribed to the topic, as in go-libp2p-pubsub.
+- **Fanout and IHAVE gossip went to peers that were not subscribed to the topic.** The heartbeat filled a topic's fanout, and `publish` chose its `IHAVE` recipients, from all connected peers. Both now pick only from connected peers subscribed to the topic, as in go-libp2p-pubsub.
 - **Unsubscribing did not tell the mesh.** `GossipSubRouter.leave` removed the mesh locally only, so the remote peers kept the node in their mesh. It now sends `PRUNE` to each mesh peer, with a backoff of `unsubscribeBackoff`.
 
 ### Added

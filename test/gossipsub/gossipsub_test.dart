@@ -712,6 +712,45 @@ void main() {
         expect(traceToMeshPeer2.sendRPC.meta.messages.first.topic, equals(testTopicName));
       });
 
+      test('publish sends IHAVE only to connected non-mesh peers subscribed to the topic', () async {
+        MockPeerId makePeer(int id, String name) {
+          final peer = MockPeerId();
+          when(peer.toBytes()).thenReturn(Uint8List.fromList([60, 1, id]));
+          when(peer.toBase58()).thenReturn(name);
+          return peer;
+        }
+        final meshPeer = makePeer(1, 'QmMesh');
+        final subscribedPeer = makePeer(2, 'QmSubscribed');
+        final unsubscribedPeer = makePeer(3, 'QmUnsubscribed');
+        final lowScorePeer = makePeer(4, 'QmLowScore');
+        when(mockNetwork.peers).thenReturn([meshPeer, subscribedPeer, unsubscribedPeer, lowScorePeer]);
+        when(mockPubsub.getPeerScore(lowScorePeer)).thenReturn(-1.0);
+        for (final peer in [meshPeer, subscribedPeer, lowScorePeer]) {
+          await router.handleRpc(peer, pb.RPC()
+            ..subscriptions.add(pb.RPC_SubOpts()
+              ..subscribe = true
+              ..topicid = testTopicName));
+        }
+        await router.join(testTopic);
+        router.mesh[testTopicName] = {meshPeer};
+
+        final sent = <PeerId, List<pb.RPC>>{};
+        when(mockComms.sendRpc(any, any, any)).thenAnswer((inv) async {
+          sent
+              .putIfAbsent(inv.positionalArguments[0] as PeerId, () => [])
+              .add(inv.positionalArguments[1] as pb.RPC);
+        });
+
+        await router.publish(testPubSubMessage);
+        await pumpEventQueue();
+
+        expect(sent.keys.toSet(), equals({meshPeer, subscribedPeer}));
+        expect(sent[meshPeer]!.single.publish.single, equals(testPbMessage));
+        final ihave = sent[subscribedPeer]!.single.control.ihave.single;
+        expect(ihave.topicID, equals(testTopicName));
+        expect(ihave.messageIDs, equals([testMessageId]));
+      });
+
       test('publish should send message to fanout peers if not in mesh and fanoutTTL passed', () async {
         // 1. Setup: Ensure NOT joined to topic, add fanout peer.
         // By not calling router.join(testTopic), we ensure it's not in the mesh.
@@ -1210,18 +1249,19 @@ void main() {
       const testTopicName = 'adv-mesh-topic';
       late Topic testTopic;
 
-      /// Makes [peers] known to [r] as subscribed to the test topic, as if each
-      /// had sent a SUBSCRIBE. A SUBSCRIBE for a topic in the mesh adds the
-      /// peer to the mesh, so the mesh is then set to [mesh].
-      void subscribePeers(FakeAsync async, GossipSubRouter r, List<PeerId> peers, Set<PeerId> mesh) {
+      /// Makes [peers] known to [r] as subscribed to [topic], as if each had
+      /// sent a SUBSCRIBE. A SUBSCRIBE for a topic in the mesh adds the peer
+      /// to the mesh, so the mesh of [topic] is then set to [mesh] if given.
+      void subscribePeers(FakeAsync async, GossipSubRouter r, List<PeerId> peers,
+          {String topic = testTopicName, Set<PeerId>? mesh}) {
         for (final peer in peers) {
           r.handleRpc(peer, pb.RPC()
             ..subscriptions.add(pb.RPC_SubOpts()
               ..subscribe = true
-              ..topicid = testTopicName));
+              ..topicid = topic));
         }
         async.flushMicrotasks();
-        r.mesh[testTopicName] = mesh;
+        if (mesh != null) r.mesh[topic] = mesh;
       }
 
       setUp(() {
@@ -1355,7 +1395,7 @@ void main() {
             mockCandidatePeer4,
             mockCandidatePeer5,
             mockCandidatePeer6,
-          ], {});
+          ], mesh: {});
 
           // Capture GRAFT RPCs
           final List<PeerId> graftedPeers = [];
@@ -1578,7 +1618,7 @@ void main() {
           ]);
           subscribePeers(async, testRouter,
               [mockExistingMeshPeer1, mockExistingMeshPeer2, mockOppGraftPeer1, mockOppGraftPeer2],
-              {mockExistingMeshPeer1, mockExistingMeshPeer2});
+              mesh: {mockExistingMeshPeer1, mockExistingMeshPeer2});
 
           final List<PeerId> opportunisticallyGraftedPeers = [];
           when(mockComms.sendRpc(captureAny, argThat(isA<pb.RPC>()
@@ -1702,13 +1742,22 @@ void main() {
           when(mockCandidateFanout3BadScore.toBase58()).thenReturn('QmCandFanout3Bad');
           when(mockPubsub.getPeerScore(mockCandidateFanout3BadScore)).thenReturn(-1.0); // Bad score
 
+          final mockUnsubscribedPeer = MockPeerId(); // Good score, not subscribed to the topic
+          when(mockUnsubscribedPeer.toBytes()).thenReturn(Uint8List.fromList([102,1,4]));
+          when(mockUnsubscribedPeer.toBase58()).thenReturn('QmUnsubscribed');
+          when(mockPubsub.getPeerScore(mockUnsubscribedPeer)).thenReturn(9.0);
+
           when(mockNetwork.peers).thenReturn([
             mockLocalPeerId,
             mockExistingFanoutPeer,
             mockCandidateFanout1,
             mockCandidateFanout2,
-            mockCandidateFanout3BadScore
+            mockCandidateFanout3BadScore,
+            mockUnsubscribedPeer,
           ]);
+          subscribePeers(async, testRouter,
+              [mockExistingFanoutPeer, mockCandidateFanout1, mockCandidateFanout2, mockCandidateFanout3BadScore],
+              topic: fanoutFillTopic);
           
           testRouter.start();
           async.elapse(testRouterParams.fanoutTTL); // Trigger heartbeat using the defined short TTL
@@ -1721,6 +1770,7 @@ void main() {
             mockCandidateFanout2
           ]));
           expect(testRouter.fanout[fanoutFillTopic], isNot(contains(mockCandidateFanout3BadScore)));
+          expect(testRouter.fanout[fanoutFillTopic], isNot(contains(mockUnsubscribedPeer)));
 
           testRouter.stop();
         });
