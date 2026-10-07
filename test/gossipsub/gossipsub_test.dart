@@ -165,13 +165,12 @@ void main() {
         // For simplicity, we'll rely on capturing and selecting.
       });
 
-      test('join should trace event and initialize topic in mesh and fanout', () async {
+      test('join should trace event and initialize topic in mesh', () async {
         await router.join(testTopic);
 
         expect(router.mesh, contains(testTopicName));
-        expect(router.mesh[testTopicName], isEmpty); // Initially empty set of peers
-        expect(router.fanout, contains(testTopicName));
-        expect(router.fanout[testTopicName], isEmpty); // Initially empty set of peers
+        expect(router.mesh[testTopicName], isEmpty); // No known peers to GRAFT
+        expect(router.fanout, isNot(contains(testTopicName)));
 
         final capturedTrace = verify(mockTracer.trace(captureAny)).captured.last as trace_pb.TraceEvent;
         expect(capturedTrace.type, equals(trace_pb.TraceEvent_Type.JOIN));
@@ -183,12 +182,6 @@ void main() {
         // First, join the topic to ensure it's there
         await router.join(testTopic);
         expect(router.mesh, contains(testTopicName));
-        expect(router.fanout, contains(testTopicName));
-
-        // Add a dummy peer to the mesh to simulate a real scenario (though PRUNE logic is TODO)
-        final dummyPeer = MockPeerId();
-        when(dummyPeer.toBytes()).thenReturn(Uint8List.fromList([4,5,6]));
-        router.mesh[testTopicName]!.add(dummyPeer);
 
         await router.leave(testTopic);
 
@@ -203,15 +196,100 @@ void main() {
         expect(capturedTrace.leave.topic, equals(testTopicName));
       });
 
+      MockPeerId makePeer(int id) {
+        final peer = MockPeerId();
+        when(peer.toBytes()).thenReturn(Uint8List.fromList([0x00, 0x01, id]));
+        when(peer.toBase58()).thenReturn('QmPeer$id');
+        return peer;
+      }
+
+      Future<void> subscribeRemote(PeerId peer, String topicName) => router.handleRpc(
+          peer,
+          pb.RPC()
+            ..subscriptions.add(pb.RPC_SubOpts()
+              ..subscribe = true
+              ..topicid = topicName));
+
+      /// Captures the RPCs sent through comms, by recipient.
+      Map<PeerId, List<pb.RPC>> captureSentRpcs() {
+        final sent = <PeerId, List<pb.RPC>>{};
+        when(mockComms.sendRpc(any, any, any)).thenAnswer((inv) async {
+          sent
+              .putIfAbsent(inv.positionalArguments[0] as PeerId, () => [])
+              .add(inv.positionalArguments[1] as pb.RPC);
+        });
+        return sent;
+      }
+
+      test('join GRAFTs up to D connected peers subscribed to the topic, fanout peers first', () async {
+        final fanoutPeer = makePeer(10);
+        final topicPeers = [for (var i = 20; i < 28; i++) makePeer(i)];
+        final disconnectedPeer = makePeer(30);
+        final lowScorePeer = makePeer(31);
+        when(mockNetwork.peers).thenReturn([fanoutPeer, ...topicPeers, lowScorePeer]);
+        when(mockPubsub.getPeerScore(lowScorePeer)).thenReturn(-1.0);
+        for (final peer in [...topicPeers, disconnectedPeer, lowScorePeer]) {
+          await subscribeRemote(peer, testTopicName);
+        }
+        router.fanout[testTopicName] = {fanoutPeer};
+        router.fanoutLastPublished[testTopicName] = DateTime.now();
+        final sent = captureSentRpcs();
+
+        await router.join(testTopic);
+        await pumpEventQueue();
+
+        final meshPeers = router.mesh[testTopicName]!;
+        expect(meshPeers.length, equals(gossipSubParams.D));
+        expect(meshPeers, contains(fanoutPeer));
+        expect(meshPeers, isNot(contains(disconnectedPeer)));
+        expect(meshPeers, isNot(contains(lowScorePeer)));
+        expect(router.fanout, isNot(contains(testTopicName)));
+        expect(router.fanoutLastPublished, isNot(contains(testTopicName)));
+
+        expect(sent.keys.toSet(), equals(meshPeers));
+        for (final rpcs in sent.values) {
+          expect(rpcs.single.control.graft.single.topicID, equals(testTopicName));
+        }
+        for (final peer in meshPeers) {
+          verify(mockConnManager.protect(peer, 'gossipsub-mesh')).called(1);
+        }
+      });
+
+      test('leave sends PRUNE with the unsubscribe backoff to each mesh peer', () async {
+        final meshPeers = [makePeer(40), makePeer(41)];
+        when(mockNetwork.peers).thenReturn(meshPeers);
+        for (final peer in meshPeers) {
+          await subscribeRemote(peer, testTopicName);
+        }
+        await router.join(testTopic);
+        expect(router.mesh[testTopicName], equals(meshPeers.toSet()));
+        final sent = captureSentRpcs();
+
+        await router.leave(testTopic);
+        await pumpEventQueue();
+
+        expect(sent.keys.toSet(), equals(meshPeers.toSet()));
+        for (final rpcs in sent.values) {
+          final prune = rpcs.single.control.prune.single;
+          expect(prune.topicID, equals(testTopicName));
+          expect(prune.backoff.toInt(), equals(gossipSubParams.unsubscribeBackoff.inSeconds));
+        }
+        for (final peer in meshPeers) {
+          verify(mockConnManager.unprotect(peer, 'gossipsub-mesh')).called(1);
+        }
+        final pruneTraces = verify(mockTracer.trace(captureAny)).captured
+            .cast<trace_pb.TraceEvent>()
+            .where((t) => t.type == trace_pb.TraceEvent_Type.PRUNE);
+        expect(pruneTraces.length, equals(meshPeers.length));
+      });
+
       test('joining an already joined topic should not create duplicate entries', () async {
         await router.join(testTopic); // First join
         final meshPeers = router.mesh[testTopicName];
-        final fanoutPeers = router.fanout[testTopicName];
 
         await router.join(testTopic); // Second join
 
         expect(router.mesh[testTopicName], same(meshPeers)); // Should be the same set instance
-        expect(router.fanout[testTopicName], same(fanoutPeers)); // Should be the same set instance
         expect(verify(mockTracer.trace(captureAny)).captured.where((t) => (t as trace_pb.TraceEvent).type == trace_pb.TraceEvent_Type.JOIN).length, equals(2));
       });
 
@@ -1101,6 +1179,30 @@ void main() {
         });
       });
       
+      test('first heartbeat runs after the initial delay, then one every heartbeat interval', () {
+        fakeAsync((async) {
+          router.stop();
+          final testRouter = GossipSubRouter(params: GossipSubParams());
+          clearInteractions(mockPubsub);
+          when(mockPubsub.refreshScores()).thenAnswer((_) => {});
+
+          testRouter.attach(mockPubsub);
+          testRouter.start();
+
+          async.elapse(const Duration(milliseconds: 99));
+          verifyNever(mockPubsub.refreshScores());
+          async.elapse(const Duration(milliseconds: 1));
+          verify(mockPubsub.refreshScores()).called(1);
+
+          async.elapse(const Duration(seconds: 10));
+          verify(mockPubsub.refreshScores()).called(10);
+
+          testRouter.stop();
+          async.elapse(const Duration(seconds: 10));
+          verifyNever(mockPubsub.refreshScores());
+        });
+      });
+
       // TODO: Test other heartbeat actions: opportunistic grafting, mesh maintenance (GRAFT/PRUNE), fanout updates.
     });
 
@@ -1376,6 +1478,7 @@ void main() {
           final testRouterParams = GossipSubParams(
             D: 3, DLow: 2, DHigh: 4, // Mesh target 3, DHigh 4
             opportunisticGraftScoreThreshold: 5.0,
+            opportunisticGraftTicks: 1, // Opportunistic grafting on every heartbeat
             fanoutTTL: Duration(seconds: 1)
           );
           final testRouter = GossipSubRouter(params: testRouterParams);

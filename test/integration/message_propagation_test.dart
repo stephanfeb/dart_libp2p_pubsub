@@ -22,6 +22,7 @@ import 'package:dart_libp2p/core/peer/addr_info.dart';
 import 'package:dart_libp2p/core/protocol/protocol.dart';
 import 'package:dart_libp2p/core/protocol/switch.dart';
 import 'package:dart_libp2p/core/connmgr/conn_manager.dart';
+import 'package:dart_libp2p/p2p/network/connmgr/null_conn_mgr.dart';
 import 'package:dart_libp2p/core/event/bus.dart' hide Subscription;
 import 'package:dart_libp2p/p2p/protocol/holepunch.dart';
 import 'package:dart_libp2p/p2p/discovery/peer_info.dart';
@@ -492,7 +493,7 @@ class MockHost implements Host {
   }
 
   @override
-  ConnManager get connManager => throw UnimplementedError('MockHost.connManager not implemented');
+  ConnManager get connManager => const NullConnMgr();
 
   @override
   EventBus get eventBus => throw UnimplementedError('MockHost.eventBus not implemented');

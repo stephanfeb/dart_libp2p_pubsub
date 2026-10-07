@@ -40,6 +40,22 @@ These parameters control the number of peers in your node's mesh for any given t
 **Tuning Advice**:
 *   Increasing `DLazy` can speed up message propagation to peers outside your immediate mesh, at the cost of more control message overhead.
 
+### Heartbeat
+
+The heartbeat is the router's periodic task. It keeps each mesh between `DLow` and `DHigh` peers, refreshes peer scores and expires fanout state.
+
+-   `heartbeatInterval` (default: `1 second`): The time between heartbeats.
+-   `heartbeatInitialDelay` (default: `100 ms`): The time from `GossipSubRouter.start()` to the first heartbeat.
+-   `opportunisticGraftTicks` (default: `60`): Opportunistic grafting (see below) runs once every this many heartbeats.
+
+These defaults are go-libp2p-pubsub's. All nodes in a network should use the same heartbeat interval.
+
+### Joining and Leaving Topics
+
+When the node subscribes to a topic, the router sends `GRAFT` to up to `D` peers at once. It picks them first from the topic's fanout, then from the other connected peers subscribed to the topic, and leaves out peers with a score below `DScore`. When the node unsubscribes, the router sends `PRUNE` to each of its mesh peers for the topic.
+
+-   `unsubscribeBackoff` (default: `10 seconds`): The backoff in the `PRUNE` messages sent on unsubscribe. It asks the pruned peers not to `GRAFT` the node again for this time.
+
 ### Fanout Control
 
 The "fanout" is the set of peers you send full messages to for a topic you are **not** subscribed to but have published to. This ensures your message gets into the network.

@@ -3,6 +3,7 @@ import 'dart:math';
 import 'dart:typed_data'; // Added explicit import for Uint8List
 
 import 'package:dart_libp2p/core/peer/peer_id.dart';
+import 'package:fixnum/fixnum.dart';
 
 import '../core/pubsub.dart';
 import '../core/message.dart';
@@ -42,6 +43,19 @@ class GossipSubParams {
   /// (go-libp2p-pubsub's `TimeCacheDuration`). A copy of a message that
   /// arrives within this time is dropped as a duplicate without validation.
   final Duration seenMessagesTTL;
+  /// Time between heartbeats, which maintain the mesh and the fanout
+  /// (go-libp2p-pubsub's `GossipSubHeartbeatInterval`).
+  final Duration heartbeatInterval;
+  /// Time from [GossipSubRouter.start] to the first heartbeat
+  /// (go-libp2p-pubsub's `GossipSubHeartbeatInitialDelay`).
+  final Duration heartbeatInitialDelay;
+  /// Opportunistic grafting runs once every this many heartbeats
+  /// (go-libp2p-pubsub's `GossipSubOpportunisticGraftTicks`).
+  final int opportunisticGraftTicks;
+  /// Backoff sent in the PRUNE messages of [GossipSubRouter.leave], asking
+  /// the pruned peers not to GRAFT us again for this time
+  /// (go-libp2p-pubsub's `GossipSubUnsubscribeBackoff`).
+  final Duration unsubscribeBackoff;
   // etc.
 
   GossipSubParams({
@@ -54,7 +68,11 @@ class GossipSubParams {
     this.prunePeers = 5, // Default number of peers for PX in PRUNE
     this.opportunisticGraftScoreThreshold = 10.0, // Default score for opportunistic grafting
     this.seenMessagesTTL = const Duration(minutes: 2),
-  });
+    this.heartbeatInterval = const Duration(seconds: 1),
+    this.heartbeatInitialDelay = const Duration(milliseconds: 100),
+    this.opportunisticGraftTicks = 60,
+    this.unsubscribeBackoff = const Duration(seconds: 10),
+  }) : assert(opportunisticGraftTicks > 0);
 
   static GossipSubParams get defaultParams => GossipSubParams();
 }
@@ -101,6 +119,8 @@ class GossipSubRouter implements Router {
   // - Seen cache (for IHAVE messages / control message IDs)
   // - Peer scores
   Timer? _heartbeatTimer;
+  /// Number of heartbeats since [start].
+  int _heartbeatTicks = 0;
   // - Outbound RPC queues per peer
   // - etc.
 
@@ -605,45 +625,31 @@ class GossipSubRouter implements Router {
       ..join = joinTrace
     );
 
-    mesh.putIfAbsent(topicId, () => <PeerId>{});
-    fanout.putIfAbsent(topicId, () => <PeerId>{});
+    final meshPeers = mesh.putIfAbsent(topicId, () => <PeerId>{});
 
-    // Removed DEBUG: Eagerly add all other known peers to the mesh for this topic
-    // // This is for testing message propagation directly, not correct GossipSub behavior.
-    // if (_pubsub != null && _pubsub!.host != null) { // Check _pubsub.host explicitly
-    //   final currentPeersInMesh = mesh[topicId]!; // Assumes topicId is always in mesh after putIfAbsent
-    //   final networkPeers = _pubsub!.host.network.peers;
-    //   if (networkPeers.isNotEmpty) {
-    //     networkPeers.forEach((peerId) {
-    //       if (peerId != _pubsub!.host.id && !currentPeersInMesh.contains(peerId)) {
-    //         print('[DEBUG] GossipSubRouter.join: Eagerly adding ${peerId.toBase58()} to mesh for topic $topicId');
-    //         currentPeersInMesh.add(peerId);
-    //       }
-    //     });
-    //   } else {
-    //     print('[DEBUG] GossipSubRouter.join: No peers found in _pubsub.host.network.peers to eagerly add to mesh for topic $topicId.');
-    //   }
-    // } else {
-    //   print('[DEBUG] GossipSubRouter.join: _pubsub or _pubsub.host is null, cannot perform eager mesh addition for topic $topicId.');
-    // }
-    // // END DEBUG
+    // As in go-libp2p-pubsub: build the mesh from the fanout peers of the
+    // topic first, then from the other peers subscribed to it, and GRAFT
+    // them, up to D peers. The fanout of the topic is no longer needed.
+    final candidates = <PeerId>[
+      ...(fanout.remove(topicId)?.toList() ?? <PeerId>[])..shuffle(),
+      ..._topicPeers(topicId).toList()..shuffle(),
+    ];
+    fanoutLastPublished.remove(topicId);
 
-    // TODO: Implement actual mesh joining logic (find peers, send GRAFT).
-    // Example of tracing a sent GRAFT:
-    // for (final peerToGraft in selectedPeers) {
-    //   final graftCtrl = pb.ControlGraft()..topicID = topicId;
-    //   final controlMsg = pb.ControlMessage()..graft.add(graftCtrl);
-    //   final rpc = pb.RPC()..control = controlMsg;
-    //   final sendRpcTrace = trace_pb.TraceEvent_SendRPC()
-    //     ..sendTo = peerToGraft.toBytes()
-    //     ..meta = (trace_pb.TraceEvent_RPCMeta()..control = controlMsg);
-    //   _pubsub?.tracer.trace(trace_pb.TraceEvent(
-    //     type: trace_pb.TraceEvent_Type.SEND_RPC,
-    //     peerID: peerToGraft.toBytes(),
-    //     sendRPC: sendRpcTrace
-    //   ));
-    //   _rpcQueueManager.sendRpc(peerToGraft, rpc, protocolId: gossipSubIDv11);
-    // }
+    final connected = _pubsub?.host.network.peers.toSet() ?? <PeerId>{};
+    for (final peerId in candidates) {
+      if (meshPeers.length >= params.D) break;
+      if (peerId == _pubsub?.host.id) continue;
+      if (meshPeers.contains(peerId)) continue;
+      if (!connected.contains(peerId)) continue;
+      final score = _pubsub?.getPeerScore(peerId) ?? 0.0;
+      if (score < params.DScore) continue;
+
+      _log.fine('GossipSubRouter: join: Sending GRAFT to ${peerId.toBase58()} for topic $topicId.');
+      _sendGraft(peerId, topicId);
+      meshPeers.add(peerId);
+      _pubsub?.host.connManager.protect(peerId, 'gossipsub-mesh');
+    }
   }
 
   @override
@@ -657,28 +663,15 @@ class GossipSubRouter implements Router {
       ..leave = leaveTrace
     );
 
-    final meshPeers = mesh[topicId];
-    if (meshPeers != null && meshPeers.isNotEmpty) {
-      _log.fine('GossipSubRouter: TODO - Send PRUNE to ${meshPeers.length} peers for topic $topicId.');
-      // Example of tracing a sent PRUNE:
-      // for (final peerToPrune in List<PeerId>.from(meshPeers)) {
-      //   final pruneCtrl = pb.ControlPrune()..topicID = topicId;
-      //   // Add PX peers to pruneCtrl.peers if any
-      //   final controlMsg = pb.ControlMessage()..prune.add(pruneCtrl);
-      //   final rpc = pb.RPC()..control = controlMsg;
-      //   final sendRpcTrace = trace_pb.TraceEvent_SendRPC()
-      //     ..sendTo = peerToPrune.toBytes()
-      //     ..meta = (trace_pb.TraceEvent_RPCMeta()..control = controlMsg);
-      //   _pubsub?.tracer.trace(trace_pb.TraceEvent(
-      //     type: trace_pb.TraceEvent_Type.SEND_RPC,
-      //     peerID: peerToPrune.toBytes(),
-      //     sendRPC: sendRpcTrace
-      //   ));
-      //   _rpcQueueManager.sendRpc(peerToPrune, rpc, protocolId: gossipSubIDv11);
-      // }
+    final meshPeers = mesh.remove(topicId) ?? <PeerId>{};
+    for (final peerToPrune in meshPeers) {
+      _log.fine('GossipSubRouter: leave: Sending PRUNE to ${peerToPrune.toBase58()} for topic $topicId.');
+      _sendPrune(peerToPrune, topicId, backoff: params.unsubscribeBackoff);
+      if (!_isPeerInAnyMesh(peerToPrune)) {
+        _pubsub?.host.connManager.unprotect(peerToPrune, 'gossipsub-mesh');
+      }
     }
 
-    mesh.remove(topicId);
     fanout.remove(topicId);
     fanoutLastPublished.remove(topicId);
   }
@@ -687,7 +680,13 @@ class GossipSubRouter implements Router {
   Future<void> start() async {
     _mcache.start();
     _heartbeatTimer?.cancel();
-    _heartbeatTimer = Timer.periodic(params.fanoutTTL, (_) => _heartbeat());
+    _heartbeatTicks = 0;
+    // As in go-libp2p-pubsub: the first heartbeat after the initial delay,
+    // then one every heartbeat interval.
+    _heartbeatTimer = Timer(params.heartbeatInitialDelay, () {
+      _heartbeatTimer = Timer.periodic(params.heartbeatInterval, (_) => _heartbeat());
+      _heartbeat();
+    });
     _log.fine('GossipSubRouter started, mcache and heartbeat timers initiated.');
   }
 
@@ -736,17 +735,72 @@ class GossipSubRouter implements Router {
     return false;
   }
 
+  /// The peers known to be subscribed to [topicId].
+  Iterable<PeerId> _topicPeers(String topicId) => _peerTopics.entries
+      .where((entry) => entry.value.contains(topicId))
+      .map((entry) => entry.key);
+
+  /// Sends a GRAFT for [topicId] to [peerId] and traces the RPC.
+  void _sendGraft(PeerId peerId, String topicId) {
+    final controlMsg = pb.ControlMessage()..graft.add(pb.ControlGraft()..topicID = topicId);
+    final controlMeta = trace_pb.TraceEvent_ControlMeta()
+      ..graft.add(trace_pb.TraceEvent_ControlGraftMeta()..topic = topicId);
+    _sendControl(peerId, controlMsg, controlMeta);
+  }
+
+  /// Sends a PRUNE for [topicId] to [peerId], with the given PX peers and
+  /// backoff, traces the RPC and traces the PRUNE.
+  void _sendPrune(PeerId peerId, String topicId,
+      {List<pb.PeerInfo> pxPeers = const [], Duration? backoff}) {
+    final pruneCtrl = pb.ControlPrune()
+      ..topicID = topicId
+      ..peers.addAll(pxPeers);
+    if (backoff != null) {
+      pruneCtrl.backoff = Int64(backoff.inSeconds);
+    }
+    final controlMsg = pb.ControlMessage()..prune.add(pruneCtrl);
+    final pruneMeta = trace_pb.TraceEvent_ControlPruneMeta()..topic = topicId;
+    for (final pxPeer in pxPeers) {
+      pruneMeta.peers.add(pxPeer.peerID);
+    }
+    final controlMeta = trace_pb.TraceEvent_ControlMeta()..prune.add(pruneMeta);
+    _sendControl(peerId, controlMsg, controlMeta);
+
+    _pubsub?.tracer.trace(trace_pb.TraceEvent()
+      ..type = trace_pb.TraceEvent_Type.PRUNE
+      ..peerID = peerId.toBytes()
+      ..prune = (trace_pb.TraceEvent_Prune()
+        ..peerID = peerId.toBytes()
+        ..topic = topicId)
+    );
+  }
+
+  void _sendControl(PeerId peerId, pb.ControlMessage controlMsg, trace_pb.TraceEvent_ControlMeta controlMeta) {
+    final sendRpcTrace = trace_pb.TraceEvent_SendRPC()
+      ..sendTo = peerId.toBytes()
+      ..meta = (trace_pb.TraceEvent_RPCMeta()..control = controlMeta);
+    _pubsub?.tracer.trace(trace_pb.TraceEvent()
+      ..type = trace_pb.TraceEvent_Type.SEND_RPC
+      ..peerID = peerId.toBytes()
+      ..sendRPC = sendRpcTrace
+    );
+    _rpcQueueManager.sendRpc(peerId, pb.RPC()..control = controlMsg, protocolId: gossipSubIDv11);
+  }
+
   void _heartbeat() {
     _log.fine('GossipSubRouter: Heartbeat tick');
     final now = DateTime.now();
+    _heartbeatTicks++;
 
     // Refresh scores for all known peers
     _pubsub?.refreshScores();
 
-    // Opportunistic Grafting
+    // Opportunistic Grafting, once every opportunisticGraftTicks heartbeats.
     // Iterate over all known topics we are subscribed to
+    final opportunisticGraft = _heartbeatTicks % params.opportunisticGraftTicks == 0;
     _pubsub?.getTopics().forEach((topicId) {
       mesh.putIfAbsent(topicId, () => <PeerId>{}); // Ensure mesh entry exists
+      if (!opportunisticGraft) return;
       final currentMeshPeers = mesh[topicId]!;
       
       if (currentMeshPeers.length >= params.DHigh) {
@@ -764,25 +818,9 @@ class GossipSubRouter implements Router {
         if (score >= params.opportunisticGraftScoreThreshold) {
           if (currentMeshPeers.length < params.DHigh) { // Double check before grafting
             _log.fine('Heartbeat: Opportunistically GRAFTing ${peerId.toBase58()} to topic $topicId (score: $score)');
-            final graftCtrl = pb.ControlGraft()..topicID = topicId;
-            final controlMsg = pb.ControlMessage()..graft.add(graftCtrl);
-            final rpc = pb.RPC()..control = controlMsg;
-            
-            final controlMeta = trace_pb.TraceEvent_ControlMeta();
-            controlMsg.graft.forEach((graft) { // Assuming controlMsg is pb.ControlMessage
-              controlMeta.graft.add(trace_pb.TraceEvent_ControlGraftMeta()..topic = graft.topicID);
-            });
-            final rpcMeta = trace_pb.TraceEvent_RPCMeta()..control = controlMeta;
-            final sendRpcTrace = trace_pb.TraceEvent_SendRPC()
-              ..sendTo = peerId.toBytes()
-              ..meta = rpcMeta;
-            _pubsub?.tracer.trace(trace_pb.TraceEvent()
-              ..type = trace_pb.TraceEvent_Type.SEND_RPC
-              ..peerID = peerId.toBytes()
-              ..sendRPC = sendRpcTrace
-            );
-            _rpcQueueManager.sendRpc(peerId, rpc, protocolId: gossipSubIDv11);
+            _sendGraft(peerId, topicId);
             mesh[topicId]!.add(peerId); // Optimistically add
+            _pubsub?.host.connManager.protect(peerId, 'gossipsub-mesh');
             // Break if we've reached DHigh to avoid over-grafting in one heartbeat
             if (mesh[topicId]!.length >= params.DHigh) break; 
           }
@@ -866,29 +904,13 @@ class GossipSubRouter implements Router {
 
         for (final peerToGraft in peersToGraft) {
           _log.fine('Heartbeat: Sending GRAFT to ${peerToGraft.toBase58()} for topic $topicId.');
-          final graftCtrl = pb.ControlGraft()..topicID = topicId;
-          final controlMsg = pb.ControlMessage()..graft.add(graftCtrl);
-          final rpc = pb.RPC()..control = controlMsg;
-          
-          final controlMeta = trace_pb.TraceEvent_ControlMeta();
-           controlMsg.graft.forEach((graft) { // Assuming controlMsg is pb.ControlMessage
-            controlMeta.graft.add(trace_pb.TraceEvent_ControlGraftMeta()..topic = graft.topicID);
-          });
-          final rpcMeta = trace_pb.TraceEvent_RPCMeta()..control = controlMeta;
-          final sendRpcTrace = trace_pb.TraceEvent_SendRPC()
-            ..sendTo = peerToGraft.toBytes()
-            ..meta = rpcMeta;
-          _pubsub?.tracer.trace(trace_pb.TraceEvent()
-            ..type = trace_pb.TraceEvent_Type.SEND_RPC
-            ..peerID = peerToGraft.toBytes()
-            ..sendRPC = sendRpcTrace
-          );
-          _rpcQueueManager.sendRpc(peerToGraft, rpc, protocolId: gossipSubIDv11);
+          _sendGraft(peerToGraft, topicId);
           // Optimistically add to mesh, will be confirmed if peer accepts GRAFT (not handled here)
           // Or, wait for GRAFT ACK if that's part of the protocol (GossipSub v1.1 doesn't have GRAFT ACKs)
           // For now, we assume GRAFT implies an attempt to join, actual mesh state updates on receiving messages or PRUNE.
           // However, the spec implies we add them to our mesh when we send GRAFT.
           mesh[topicId]!.add(peerToGraft); 
+          _pubsub?.host.connManager.protect(peerToGraft, 'gossipsub-mesh');
         }
       } else if (currentMeshSize > params.DHigh) {
         final excess = currentMeshSize - params.D; // Number of peers to prune to reach D
@@ -907,10 +929,7 @@ class GossipSubRouter implements Router {
 
         for (final peerToPrune in peersToPrune) {
           _log.fine('Heartbeat: Sending PRUNE to ${peerToPrune.toBase58()} for topic $topicId.');
-          
-          // Construct PRUNE control message
-          final pruneCtrl = pb.ControlPrune()..topicID = topicId;
-          
+
           // Add Peer Exchange (PX) information
           final List<pb.PeerInfo> pxPeers = []; // Corrected type to pb.PeerInfo
           // Select some other peers from the current mesh to suggest
@@ -924,31 +943,11 @@ class GossipSubRouter implements Router {
             pxPeers.add(pb.PeerInfo()..peerID = pxPeerId.toBytes()); // Corrected constructor to pb.PeerInfo
           }
           if (pxPeers.isNotEmpty) {
-            pruneCtrl.peers.addAll(pxPeers);
             _log.fine('Heartbeat: Adding ${pxPeers.length} PX peers to PRUNE for ${peerToPrune.toBase58()} on topic $topicId.');
           }
 
           // TODO: Add backoff logic for PRUNE as per spec (ControlPrune.backoff)
-          final controlMsg = pb.ControlMessage()..prune.add(pruneCtrl);
-          final rpc = pb.RPC()..control = controlMsg;
-
-          final controlMeta = trace_pb.TraceEvent_ControlMeta();
-          controlMsg.prune.forEach((prune) { // Assuming controlMsg is pb.ControlMessage
-            final pruneMeta = trace_pb.TraceEvent_ControlPruneMeta()..topic = prune.topicID;
-            // Assuming prune.peers are List<pb.PeerInfo> and TraceEvent_ControlPruneMeta.peers is List<List<int>>
-            prune.peers.forEach((pxPeer) => pruneMeta.peers.add(pxPeer.peerID));
-            controlMeta.prune.add(pruneMeta);
-          });
-          final rpcMeta = trace_pb.TraceEvent_RPCMeta()..control = controlMeta;
-          final sendRpcTrace = trace_pb.TraceEvent_SendRPC()
-            ..sendTo = peerToPrune.toBytes()
-            ..meta = rpcMeta;
-           _pubsub?.tracer.trace(trace_pb.TraceEvent()
-            ..type = trace_pb.TraceEvent_Type.SEND_RPC
-            ..peerID = peerToPrune.toBytes()
-            ..sendRPC = sendRpcTrace
-          );
-          _rpcQueueManager.sendRpc(peerToPrune, rpc, protocolId: gossipSubIDv11);
+          _sendPrune(peerToPrune, topicId, pxPeers: pxPeers);
           
           // Remove from local mesh
           mesh[topicId]!.remove(peerToPrune);
@@ -958,16 +957,6 @@ class GossipSubRouter implements Router {
             _pubsub?.host?.connManager.unprotect(peerToPrune, 'gossipsub-mesh');
             _log.fine('Heartbeat: Unprotected pruned peer $peerToPrune (not in any mesh)');
           }
-
-          // Also trace the PRUNE event itself
-          final pruneTrace = trace_pb.TraceEvent_Prune()
-            ..peerID = peerToPrune.toBytes() // The peer we are pruning
-            ..topic = topicId;
-           _pubsub?.tracer.trace(trace_pb.TraceEvent()
-            ..type = trace_pb.TraceEvent_Type.PRUNE
-            ..peerID = peerToPrune.toBytes()
-            ..prune = pruneTrace
-          );
         }
       }
     });

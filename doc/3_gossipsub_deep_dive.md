@@ -59,9 +59,9 @@ This "lazy" propagation ensures that messages spread throughout the network with
 
 ## Heartbeats: Keeping the Mesh Healthy
 
-The `GossipSubRouter` periodically sends heartbeat messages to all of its connected peers. These heartbeats serve several purposes:
+The `GossipSubRouter` runs a heartbeat every `GossipSubParams.heartbeatInterval` (1 second by default, as in go-libp2p-pubsub). The heartbeat serves several purposes:
 
--   **Mesh Maintenance**: Heartbeats give peers an opportunity to `GRAFT` or `PRUNE` connections, ensuring the mesh stays healthy and within its configured size limits.
+-   **Mesh Maintenance**: The router sends `GRAFT` when a mesh has fewer than `DLow` peers and `PRUNE` when it has more than `DHigh`, ensuring the mesh stays healthy and within its configured size limits. A node that subscribes to a topic does not wait for a heartbeat: it sends `GRAFT` to up to `D` peers at once, and it sends `PRUNE` to its mesh peers when it unsubscribes.
 -   **Gossip Exchange**: The heartbeat mechanism is also used to piggyback and send `IHAVE` gossip to other peers.
 -   **Peer Discovery**: It helps in discovering other peers and their topic subscriptions.
 
