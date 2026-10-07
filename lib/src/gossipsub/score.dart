@@ -1,494 +1,505 @@
-import 'dart:math' show pow;
+import 'dart:async';
+import 'dart:collection';
+import 'dart:io' show InternetAddress, InternetAddressType;
+import 'dart:typed_data';
 
-import 'package:dart_libp2p/core/peer/peer_id.dart';
 import 'package:clock/clock.dart';
-import 'score_params.dart'; // Import the actual PeerScoreParams
+import 'package:dart_libp2p/core/peer/peer_id.dart';
 import 'package:logging/logging.dart';
+
+import 'score_params.dart';
 
 final _log = Logger('PeerScore');
 
-/// Holds scoring statistics for a peer within a specific topic.
-class TopicScoreStats {
-  /// True if the peer is in our mesh for this topic.
-  bool inMesh = false;
+/// Why a message was not accepted, for [PeerScore.rejectMessage]; as the
+/// reject reasons of go-libp2p-pubsub that matter to scoring.
+enum RejectReason {
+  /// The message failed the structure or signature checks. Its ID cannot be
+  /// trusted, so only the peer that sent it is penalised.
+  invalidSignature,
 
-  /// Time when the peer was GRAFTed into the mesh for this topic. Null if not in mesh.
-  DateTime? graftTime;
+  /// A validator rejected the message: the sender, and every peer that
+  /// forwards the message later, is penalised.
+  validationFailed,
 
-  /// Cumulative time the peer has been in the mesh for the current scoring interval.
-  /// This is subject to caps and decay as per [PeerScoreParams.TopicScoreParams.timeInMeshQuantum].
-  Duration meshTime = Duration.zero;
+  /// A validator ignored the message, or it timed out: no penalty.
+  validationIgnored,
 
-  /// Counter for first message deliveries from this peer in this topic (P3a).
-  int firstMessageDeliveries = 0;
-
-  /// Counter for messages delivered by this peer while in the mesh for this topic (P2).
-  int meshMessageDeliveries = 0;
-
-  /// True if the [meshMessageDeliveries] counter is active for the current refresh interval.
-  /// This is set to true when the peer sends a message, and reset after [PeerScoreParams.TopicScoreParams.meshMessageDeliveriesDecay].
-  bool meshMessageDeliveriesActive = false;
-
-  /// Timestamp of when [meshMessageDeliveriesActive] was set to true.
-  DateTime meshMessageDeliveriesActivation = DateTime.fromMillisecondsSinceEpoch(0);
-  
-  /// Counter for mesh message delivery failures from this peer in this topic (P2 penalty).
-  int meshFailurePenalty = 0;
-
-  /// Counter for invalid messages received from this peer in this topic
-  /// since the last [PeerScore.refreshScore]. It is reset at each refresh;
-  /// the P3b penalty uses [decayedInvalidMessageDeliveries].
-  int invalidMessageDeliveries = 0;
-
-  /// The P3b counter, as `invalidMessageDeliveries` in go-libp2p-pubsub.
-  /// Each invalid message adds 1. At each decay interval the counter is
-  /// multiplied by [TopicScoreParams.invalidMessageDeliveriesDecay] and set
-  /// to 0 when it falls below [PeerScoreParams.decayToZero]. The P3b penalty
-  /// is `invalidMessageDeliveriesWeight * counter^2`. Not reset by
-  /// [resetCounters].
-  double decayedInvalidMessageDeliveries = 0.0;
-
-  /// Timestamp of the last successful message delivery from this peer in this topic.
-  /// Used to check against [PeerScoreParams.TopicScoreParams.topicWeightCapGracePeriod] for P1 cap.
-  DateTime lastSuccessfulDelivery = DateTime.fromMillisecondsSinceEpoch(0);
-
-
-  TopicScoreStats();
-
-  /// Resets the counters that are subject to decay or periodic refresh.
-  /// Does not reset [inMesh], [graftTime], or [meshTime] as these persist or are handled differently.
-  void resetCounters() {
-    firstMessageDeliveries = 0;
-    meshMessageDeliveries = 0;
-    // meshMessageDeliveriesActive is managed by its own decay logic
-    meshFailurePenalty = 0;
-    invalidMessageDeliveries = 0;
-  }
+  /// Validation was throttled: no penalty, as the message may be valid.
+  validationThrottled,
 }
 
-/// Represents the scoring state and statistics for a single peer.
+/// The scoring counters of a peer in a topic, as go-libp2p-pubsub's
+/// `topicStats`.
+class TopicScoreStats {
+  /// Whether the peer is in our mesh for the topic.
+  bool inMesh = false;
+
+  /// When the peer was (last) GRAFTed; valid while [inMesh].
+  DateTime graftTime = DateTime.fromMillisecondsSinceEpoch(0);
+
+  /// The time the peer has been in the mesh, updated at each decay.
+  Duration meshTime = Duration.zero;
+
+  /// P2 counter.
+  double firstMessageDeliveries = 0;
+
+  /// P3 counter.
+  double meshMessageDeliveries = 0;
+
+  /// Whether the peer has been in the mesh long enough for P3 to apply.
+  bool meshMessageDeliveriesActive = false;
+
+  /// P3b counter.
+  double meshFailurePenalty = 0;
+
+  /// P4 counter.
+  double invalidMessageDeliveries = 0;
+}
+
+class _PeerStats {
+  bool connected = false;
+  DateTime expire = DateTime.fromMillisecondsSinceEpoch(0);
+  final Map<String, TopicScoreStats> topics = {};
+  List<String> ips = const [];
+  final Map<String, bool> ipWhitelist = {};
+  double behaviourPenalty = 0;
+}
+
+enum _DeliveryStatus { unknown, valid, invalid, ignored, throttled }
+
+class _DeliveryRecord {
+  _DeliveryStatus status = _DeliveryStatus.unknown;
+  final DateTime firstSeen;
+  DateTime? validated;
+  Set<PeerId> peers = {};
+  _DeliveryRecord(this.firstSeen);
+}
+
+/// A snapshot of a peer's score and its components, as go-libp2p-pubsub's
+/// `PeerScoreSnapshot`.
+class PeerScoreSnapshot {
+  final double score;
+  final Map<String, TopicScoreStats> topics;
+  final double appSpecificScore;
+  final double ipColocationFactor;
+  final double behaviourPenalty;
+
+  PeerScoreSnapshot(this.score, this.topics, this.appSpecificScore,
+      this.ipColocationFactor, this.behaviourPenalty);
+}
+
+/// Peer scoring for GossipSub v1.1, as go-libp2p-pubsub's `peerScore`.
+///
+/// The router reports peer and message events to it (the tracer methods of
+/// `peerScore` in Go); counters decay every [PeerScoreParams.decayInterval]
+/// while [start]ed, and [score] computes a peer's score from them.
 class PeerScore {
-  final PeerId peerId;
   final PeerScoreParams params;
 
-  /// The current score for the peer.
-  double score = 0.0;
+  /// Returns the IPs of the connections to a peer, for P6. Set by the
+  /// router; IPv6 addresses also count for their /64.
+  final List<String> Function(PeerId peer)? _connectionIps;
 
-  /// Per-topic statistics for the peer.
-  /// topic_string -> TopicScoreStats
-  final Map<String, TopicScoreStats> topicStats = {};
+  final Map<PeerId, _PeerStats> _peerStats = {};
 
-  /// IP colocation tracking. Set of IP addresses seen for this peer.
-  final Set<String> knownIPs = {};
+  /// IP -> the peers connected from it.
+  final Map<String, Set<PeerId>> _peerIPs = {};
 
-  /// True if the peer is currently IP-colocated with another active peer.
-  bool ipColocated = false;
+  final Map<String, _DeliveryRecord> _deliveries = {};
 
-  /// Behavioral penalty counter (P6).
-  int behaviourPenalty = 0;
+  /// Delivery record IDs with their expiry, oldest first.
+  final Queue<(String, DateTime)> _deliveryExpiry = Queue();
 
-  /// Global counter for invalid messages from this peer (P6).
-  int invalidMessageDeliveries = 0;
+  late final List<IpNet> _whitelist =
+      params.ipColocationFactorWhitelist.map((c) => IpNet.tryParse(c)!).toList();
 
-  /// Value of the application-specific score component (P7).
-  /// This is calculated by the function [PeerScoreParams.appSpecificScore].
-  double appSpecificScoreValue = 0.0;
+  Timer? _refreshTimer;
+  Timer? _refreshIpsTimer;
+  Timer? _gcTimer;
 
-  /// Timestamp of the last score calculation. Used for score decay.
-  DateTime lastUpdated;
-
-  /// Timestamp until which the peer is graylisted. Null if not graylisted.
-  /// A peer is graylisted if its score is below [PeerScoreParams.graylistThreshold].
-  DateTime? graylistUntil;
-
-  /// Clock to use for time-sensitive operations.
-  final Clock _clock;
-
-  /// The P3b penalty that is currently included in [score]. P3b is not
-  /// accumulated like the other components: it is computed again from the
-  /// decayed counters each time, so it is removed from [score] before the
-  /// score is decayed and then added again.
-  double _appliedInvalidPenalty = 0.0;
-
-  // TODO: Review remaining fields from go-libp2p-pubsub/score.go PeerStats:
-  // - firstMessageDeliveries: Now in TopicScoreStats.
-  // - meshMessageDeliveries: Now in TopicScoreStats.
-  // - meshFailurePenalty: Now in TopicScoreStats.
-  // - invalidMessageDeliveries: Global counter added, per-topic in TopicScoreStats.
-  // - applicationSpecificScore: Function is in params, value stored as appSpecificScoreValue.
-  // - lastUpdated: Added.
-  // - graylistUntil: Added.
-  // - Other potential fields: connected (bool), P3b stats if more granular than counter.
-  // - `sticky` flag for peers with sticky connections (exempt from scoring/pruning in some cases)
-
-  PeerScore(this.peerId, this.params, {Clock? clock}) 
-    : _clock = clock ?? const Clock(),
-      lastUpdated = clock?.now() ?? DateTime.now();
-
-  /// Retrieves or creates [TopicScoreStats] for a given topic.
-  TopicScoreStats _getOrAddTopicStats(String topic) {
-    return topicStats.putIfAbsent(topic, () => TopicScoreStats());
+  /// Creates peer scoring with [params], which must be valid (see
+  /// [PeerScoreParams.validate]). [connectionIps] returns the IP addresses
+  /// of the connections to a peer.
+  PeerScore(this.params, {List<String> Function(PeerId peer)? connectionIps})
+      : _connectionIps = connectionIps {
+    params.validate();
   }
 
-  /// Recalculates the peer's score based on current stats and params.
-  /// This is typically called periodically (e.g., by the heartbeat).
-  void refreshScore() {
-    final now = _clock.now();
-    double currentRawScore = 0;
+  /// Starts decaying counters and expiring records.
+  void start() {
+    stop();
+    _refreshTimer = Timer.periodic(params.decayInterval, (_) => refreshScores());
+    _refreshIpsTimer = Timer.periodic(const Duration(minutes: 1), (_) => _refreshIps());
+    _gcTimer = Timer.periodic(const Duration(minutes: 1), (_) => _gcDeliveryRecords());
+  }
 
-    // Take out the P3b penalty of the previous refresh; it is computed again
-    // below from the decayed counters.
-    score -= _appliedInvalidPenalty;
-    _appliedInvalidPenalty = 0.0;
+  void stop() {
+    _refreshTimer?.cancel();
+    _refreshIpsTimer?.cancel();
+    _gcTimer?.cancel();
+    _refreshTimer = _refreshIpsTimer = _gcTimer = null;
+  }
 
-    // Apply score decay
-    final timeSinceLastUpdate = now.difference(lastUpdated);
-    
-    // Calculate the number of decay intervals that have passed.
-    final numIntervals = (params.decayInterval.inMilliseconds > 0)
-        ? (timeSinceLastUpdate.inMilliseconds / params.decayInterval.inMilliseconds).floor()
-        : 0;
-    
-    if (numIntervals > 0) {
-      for (int i = 0; i < numIntervals; i++) {
-        score *= params.scoreDecay;
-        if (score.abs() < params.decayToZero) {
-          score = 0; // Snap to zero if it's decaying towards it and falls below the threshold
-        }
+  /// The score of [peer]; 0 for an unknown peer.
+  double score(PeerId peer) {
+    final pstats = _peerStats[peer];
+    if (pstats == null) return 0;
+
+    var score = 0.0;
+    for (final entry in pstats.topics.entries) {
+      final topicParams = params.topics[entry.key];
+      if (topicParams == null) continue; // Not a scored topic.
+      final t = entry.value;
+      var topicScore = 0.0;
+
+      // P1: time in mesh.
+      if (t.inMesh) {
+        var p1 = (t.meshTime.inMicroseconds ~/ topicParams.timeInMeshQuantum.inMicroseconds).toDouble();
+        if (p1 > topicParams.timeInMeshCap) p1 = topicParams.timeInMeshCap;
+        topicScore += p1 * topicParams.timeInMeshWeight;
+      }
+
+      // P2: first message deliveries.
+      topicScore += t.firstMessageDeliveries * topicParams.firstMessageDeliveriesWeight;
+
+      // P3: mesh message delivery deficit.
+      if (t.meshMessageDeliveriesActive &&
+          t.meshMessageDeliveries < topicParams.meshMessageDeliveriesThreshold) {
+        final deficit = topicParams.meshMessageDeliveriesThreshold - t.meshMessageDeliveries;
+        topicScore += deficit * deficit * topicParams.meshMessageDeliveriesWeight;
+      }
+
+      // P3b: sticky mesh failure penalty.
+      topicScore += t.meshFailurePenalty * topicParams.meshFailurePenaltyWeight;
+
+      // P4: invalid messages.
+      topicScore += t.invalidMessageDeliveries * t.invalidMessageDeliveries *
+          topicParams.invalidMessageDeliveriesWeight;
+
+      score += topicScore * topicParams.topicWeight;
+    }
+
+    if (params.topicScoreCap > 0 && score > params.topicScoreCap) {
+      score = params.topicScoreCap;
+    }
+
+    // P5: application-specific score.
+    score += params.appSpecificScore(peer) * params.appSpecificWeight;
+
+    // P6: IP colocation.
+    score += _ipColocationFactor(peer) * params.ipColocationFactorWeight;
+
+    // P7: behaviour penalty.
+    if (pstats.behaviourPenalty > params.behaviourPenaltyThreshold) {
+      final excess = pstats.behaviourPenalty - params.behaviourPenaltyThreshold;
+      score += excess * excess * params.behaviourPenaltyWeight;
+    }
+
+    return score;
+  }
+
+  /// A snapshot of the score of [peer] and its components, or null for an
+  /// unknown peer.
+  PeerScoreSnapshot? snapshot(PeerId peer) {
+    final pstats = _peerStats[peer];
+    if (pstats == null) return null;
+    return PeerScoreSnapshot(score(peer), Map.unmodifiable(pstats.topics),
+        params.appSpecificScore(peer), _ipColocationFactor(peer), pstats.behaviourPenalty);
+  }
+
+  double _ipColocationFactor(PeerId peer) {
+    final pstats = _peerStats[peer];
+    if (pstats == null) return 0;
+    var result = 0.0;
+    for (final ip in pstats.ips) {
+      if (_whitelist.isNotEmpty) {
+        final whitelisted =
+            pstats.ipWhitelist.putIfAbsent(ip, () => _whitelist.any((net) => net.contains(ip)));
+        if (whitelisted) continue;
+      }
+      final peersInIP = _peerIPs[ip]?.length ?? 0;
+      if (peersInIP > params.ipColocationFactorThreshold) {
+        final surplus = (peersInIP - params.ipColocationFactorThreshold).toDouble();
+        result += surplus * surplus;
       }
     }
-    
-    // P7: Application-specific score
-    if (params.appSpecificScore != null) {
-      appSpecificScoreValue = params.appSpecificScore!(peerId);
-      // P7 is directly added to the score at the end, after P1-P6 and P5 factor.
-    } else {
-      appSpecificScoreValue = 0.0;
-    }
+    return result;
+  }
 
-    double topicScoresTotal = 0;
-    double invalidPenaltyTotal = 0;
+  /// Adds [count] to the behaviour penalty (P7) of [peer].
+  void addPenalty(PeerId peer, int count) {
+    final pstats = _peerStats[peer];
+    if (pstats == null) return;
+    pstats.behaviourPenalty += count;
+  }
 
-    // P1-P4: Topic-based scores
-    for (final topicEntry in topicStats.entries) {
-      final topic = topicEntry.key;
-      final tStats = topicEntry.value;
-      final tParams = params.getTopicParams(topic);
-      
-      double currentTopicScore = 0;
-
-      // P1: Time in Mesh
-      if (tStats.inMesh) {
-        // Update meshTime: Time elapsed since last update, or since graftTime if more recent.
-        DateTime meshTimeReference = tStats.graftTime ?? lastUpdated;
-        if (lastUpdated.isAfter(meshTimeReference)) {
-            meshTimeReference = lastUpdated;
-        }
-        final meshDurationThisPeriod = now.difference(meshTimeReference);
-        tStats.meshTime += meshDurationThisPeriod;
-
-        final quantaInMesh = (tStats.meshTime.inMilliseconds / tParams.timeInMeshQuantum.inMilliseconds).floor();
-        double p1Score = quantaInMesh * tParams.topicWeight;
-        
-        if (p1Score > tParams.timeInMeshCap) {
-          p1Score = tParams.timeInMeshCap;
-        }
-        
-        // P1 Cap Grace Period: If peer is in mesh but hasn't delivered messages recently,
-        // P1 score is capped at 0.
-        final timeSinceLastDelivery = now.difference(tStats.lastSuccessfulDelivery);
-        if (timeSinceLastDelivery > tParams.topicWeightCapGracePeriod) {
-          if (p1Score > 0) { // Only cap if it was positive
-             p1Score = 0;
+  /// Decays the counters, and deletes the scores of peers disconnected for
+  /// [PeerScoreParams.retainScore]. Called every decay interval.
+  void refreshScores() {
+    final now = clock.now();
+    final expired = <PeerId>[];
+    _peerStats.forEach((peer, pstats) {
+      if (!pstats.connected) {
+        // Retained scores do not decay, so that reconnecting does not help.
+        if (now.isAfter(pstats.expire)) expired.add(peer);
+        return;
+      }
+      pstats.topics.forEach((topic, t) {
+        final topicParams = params.topics[topic];
+        if (topicParams == null) return;
+        t.firstMessageDeliveries = _decay(t.firstMessageDeliveries, topicParams.firstMessageDeliveriesDecay);
+        t.meshMessageDeliveries = _decay(t.meshMessageDeliveries, topicParams.meshMessageDeliveriesDecay);
+        t.meshFailurePenalty = _decay(t.meshFailurePenalty, topicParams.meshFailurePenaltyDecay);
+        t.invalidMessageDeliveries = _decay(t.invalidMessageDeliveries, topicParams.invalidMessageDeliveriesDecay);
+        if (t.inMesh) {
+          t.meshTime = now.difference(t.graftTime);
+          if (t.meshTime > topicParams.meshMessageDeliveriesActivation) {
+            t.meshMessageDeliveriesActive = true;
           }
         }
-        currentTopicScore += p1Score;
-        
-        // "Consume" the mesh time that has been scored by resetting meshTime based on quanta.
-        // This ensures we only score new mesh time in the next interval.
-        // Or, more simply, cap meshTime at the max scorable duration if not resetting.
-        // The spec implies meshTime is a cumulative counter for the current scoring period,
-        // reset/decayed at the end of the period or when P1 cap is hit.
-        // Let's adjust tStats.meshTime to reflect only the unscored portion for the next round,
-        // or cap it if it exceeds a very large value to prevent overflow.
-        // For now, we'll let it accumulate and rely on the cap.
-        // The decay of P1 happens via the global score decay.
+      });
+      pstats.behaviourPenalty = _decay(pstats.behaviourPenalty, params.behaviourPenaltyDecay);
+    });
+    for (final peer in expired) {
+      _removeIps(peer, _peerStats.remove(peer)!.ips);
+      _log.fine('Deleted the retained score of ${peer.toBase58()}');
+    }
+  }
+
+  double _decay(double value, double decay) {
+    final decayed = value * decay;
+    return decayed < params.decayToZero ? 0 : decayed;
+  }
+
+  // --- Peer events ---
+
+  /// A peer that speaks pubsub connected.
+  void addPeer(PeerId peer) {
+    final pstats = _peerStats.putIfAbsent(peer, _PeerStats.new);
+    pstats.connected = true;
+    final ips = _ipsOf(peer);
+    _setIps(peer, ips, pstats.ips);
+    pstats.ips = ips;
+  }
+
+  /// A peer disconnected. A score > 0 is deleted; otherwise it is kept for
+  /// [PeerScoreParams.retainScore], with the first deliveries reset and the
+  /// mesh delivery deficit turned into a failure penalty.
+  void removePeer(PeerId peer) {
+    final pstats = _peerStats[peer];
+    if (pstats == null) return;
+    if (score(peer) > 0) {
+      _removeIps(peer, pstats.ips);
+      _peerStats.remove(peer);
+      return;
+    }
+    pstats.topics.forEach((topic, t) {
+      t.firstMessageDeliveries = 0;
+      final threshold = params.topics[topic]?.meshMessageDeliveriesThreshold ?? 0;
+      if (t.inMesh && t.meshMessageDeliveriesActive && t.meshMessageDeliveries < threshold) {
+        final deficit = threshold - t.meshMessageDeliveries;
+        t.meshFailurePenalty += deficit * deficit;
       }
-      
-      // P3a: First Message Deliveries (referred to as P2 in some of our earlier comments)
-      // Score for delivering the first message successfully.
-      double p3aScore = tStats.firstMessageDeliveries * tParams.firstMessageDeliveriesWeight;
-      if (p3aScore > tParams.firstMessageDeliveriesCap) {
-        p3aScore = tParams.firstMessageDeliveriesCap;
+      t.inMesh = false;
+    });
+    pstats.connected = false;
+    pstats.expire = clock.now().add(params.retainScore);
+  }
+
+  /// [peer] joined our mesh for [topic].
+  void graft(PeerId peer, String topic) {
+    final t = _topicStats(peer, topic);
+    if (t == null) return;
+    t.inMesh = true;
+    t.graftTime = clock.now();
+    t.meshTime = Duration.zero;
+    t.meshMessageDeliveriesActive = false;
+  }
+
+  /// [peer] left our mesh for [topic].
+  void prune(PeerId peer, String topic) {
+    final t = _topicStats(peer, topic);
+    if (t == null) return;
+    final threshold = params.topics[topic]!.meshMessageDeliveriesThreshold;
+    if (t.meshMessageDeliveriesActive && t.meshMessageDeliveries < threshold) {
+      final deficit = threshold - t.meshMessageDeliveries;
+      t.meshFailurePenalty += deficit * deficit;
+    }
+    t.inMesh = false;
+  }
+
+  // --- Message events ---
+
+  /// Validation of message [msgId] begins (its signature is valid).
+  void validateMessage(String msgId) => _record(msgId);
+
+  /// Message [msgId] on [topic], first received from [from], was accepted.
+  void deliverMessage(String msgId, PeerId from, String topic) {
+    _markFirstMessageDelivery(from, topic);
+    final rec = _record(msgId);
+    if (rec.status != _DeliveryStatus.unknown) return;
+    rec.status = _DeliveryStatus.valid;
+    rec.validated = clock.now();
+    // Credit the mesh peers that forwarded it while it was in validation.
+    for (final peer in rec.peers) {
+      if (peer != from) _markDuplicateMessageDelivery(peer, topic, null);
+    }
+  }
+
+  /// Message [msgId] on [topic], first received from [from], was not
+  /// accepted, for [reason].
+  void rejectMessage(String msgId, PeerId from, String topic, RejectReason reason) {
+    if (reason == RejectReason.invalidSignature) {
+      // The ID may be forged: penalise the sender only, track nothing.
+      _markInvalidMessageDelivery(from, topic);
+      return;
+    }
+    final rec = _record(msgId);
+    if (rec.status != _DeliveryStatus.unknown) return;
+    switch (reason) {
+      case RejectReason.validationThrottled:
+        rec.status = _DeliveryStatus.throttled;
+        rec.peers = {};
+        return;
+      case RejectReason.validationIgnored:
+        rec.status = _DeliveryStatus.ignored;
+        rec.peers = {};
+        return;
+      case RejectReason.validationFailed:
+      case RejectReason.invalidSignature:
+        break;
+    }
+    rec.status = _DeliveryStatus.invalid;
+    _markInvalidMessageDelivery(from, topic);
+    for (final peer in rec.peers) {
+      _markInvalidMessageDelivery(peer, topic);
+    }
+    rec.peers = {};
+  }
+
+  /// [from] sent message [msgId] on [topic], which was seen before.
+  void duplicateMessage(String msgId, PeerId from, String topic) {
+    final rec = _record(msgId);
+    if (rec.peers.contains(from)) return; // Counted already.
+    switch (rec.status) {
+      case _DeliveryStatus.unknown:
+        // In validation: credit or penalise when it completes.
+        rec.peers.add(from);
+      case _DeliveryStatus.valid:
+        rec.peers.add(from);
+        _markDuplicateMessageDelivery(from, topic, rec.validated);
+      case _DeliveryStatus.invalid:
+        _markInvalidMessageDelivery(from, topic);
+      case _DeliveryStatus.throttled:
+      case _DeliveryStatus.ignored:
+        break;
+    }
+  }
+
+  _DeliveryRecord _record(String msgId) {
+    final existing = _deliveries[msgId];
+    if (existing != null) return existing;
+    final now = clock.now();
+    final rec = _DeliveryRecord(now);
+    _deliveries[msgId] = rec;
+    _deliveryExpiry.addLast((msgId, now.add(params.seenMsgTTL)));
+    return rec;
+  }
+
+  void _gcDeliveryRecords() {
+    final now = clock.now();
+    while (_deliveryExpiry.isNotEmpty && now.isAfter(_deliveryExpiry.first.$2)) {
+      _deliveries.remove(_deliveryExpiry.removeFirst().$1);
+    }
+  }
+
+  /// The stats of [peer] in [topic], created if [topic] is scored; null if
+  /// the peer is unknown or the topic is not scored.
+  TopicScoreStats? _topicStats(PeerId peer, String topic) {
+    final pstats = _peerStats[peer];
+    if (pstats == null) return null;
+    final existing = pstats.topics[topic];
+    if (existing != null) return existing;
+    if (!params.topics.containsKey(topic)) return null;
+    return pstats.topics[topic] = TopicScoreStats();
+  }
+
+  void _markInvalidMessageDelivery(PeerId peer, String topic) {
+    final t = _topicStats(peer, topic);
+    if (t != null) t.invalidMessageDeliveries += 1;
+  }
+
+  void _markFirstMessageDelivery(PeerId peer, String topic) {
+    final t = _topicStats(peer, topic);
+    if (t == null) return;
+    final topicParams = params.topics[topic]!;
+    t.firstMessageDeliveries += 1;
+    if (t.firstMessageDeliveries > topicParams.firstMessageDeliveriesCap) {
+      t.firstMessageDeliveries = topicParams.firstMessageDeliveriesCap;
+    }
+    if (!t.inMesh) return;
+    t.meshMessageDeliveries += 1;
+    if (t.meshMessageDeliveries > topicParams.meshMessageDeliveriesCap) {
+      t.meshMessageDeliveries = topicParams.meshMessageDeliveriesCap;
+    }
+  }
+
+  /// Credits a mesh peer for a copy received within the delivery window of
+  /// the first copy ([validated] null: before validation completed).
+  void _markDuplicateMessageDelivery(PeerId peer, String topic, DateTime? validated) {
+    final t = _topicStats(peer, topic);
+    if (t == null || !t.inMesh) return;
+    final topicParams = params.topics[topic]!;
+    if (validated != null &&
+        clock.now().difference(validated) > topicParams.meshMessageDeliveriesWindow) {
+      return;
+    }
+    t.meshMessageDeliveries += 1;
+    if (t.meshMessageDeliveries > topicParams.meshMessageDeliveriesCap) {
+      t.meshMessageDeliveries = topicParams.meshMessageDeliveriesCap;
+    }
+  }
+
+  // --- IP tracking ---
+
+  List<String> _ipsOf(PeerId peer) {
+    final ips = <String>[];
+    for (final ip in _connectionIps?.call(peer) ?? const <String>[]) {
+      final address = InternetAddress.tryParse(ip);
+      if (address == null || address.isLoopback) continue; // Loopback: tests.
+      ips.add(address.address);
+      if (address.type == InternetAddressType.IPv6) {
+        // An IPv6 peer also counts for its /64.
+        final raw = Uint8List.fromList(address.rawAddress)..fillRange(8, 16, 0);
+        ips.add(InternetAddress.fromRawAddress(raw, type: InternetAddressType.IPv6).address);
       }
-      // TODO: Apply tParams.firstMessageDeliveriesDecay to tStats.firstMessageDeliveries counter
-      // if decay is < 1.0. Typically this counter is reset periodically.
-      currentTopicScore += p3aScore;
-
-      // P2: Mesh Message Deliveries (referred to as P3 in some of our earlier comments)
-      // Score for messages delivered whilst in the mesh.
-      if (tStats.meshMessageDeliveriesActive) {
-        if (now.difference(tStats.meshMessageDeliveriesActivation) > tParams.meshMessageDeliveriesActivationWindow) {
-          tStats.meshMessageDeliveriesActive = false;
-          tStats.meshMessageDeliveries = 0; // Reset counter after activation window expires
-        } else {
-          // TODO: Apply tParams.meshMessageDeliveriesWindowDecay to tStats.meshMessageDeliveries counter
-          // if decay is < 1.0, for gradual decay within the window.
-          double p2Score = tStats.meshMessageDeliveries * tParams.meshMessageDeliveriesWeight;
-          if (p2Score > tParams.meshMessageDeliveriesCap) {
-            p2Score = tParams.meshMessageDeliveriesCap;
-          }
-          currentTopicScore += p2Score;
-        }
-      }
-      // TODO: Apply tParams.meshMessageDeliveriesDecay if this counter is meant to decay outside the active window.
-      // For now, it's reset when the window expires or by resetCounters().
-
-      // P4 / P2 Penalty: Mesh Message Delivery Failure Penalty
-      // Penalty for failing to deliver messages requested via IWANT.
-      double p4Score = tStats.meshFailurePenalty * tParams.meshFailurePenaltyWeight;
-      // TODO: Apply tParams.meshFailurePenaltyDecay to tStats.meshFailurePenalty counter
-      // if decay is < 1.0. Typically this counter is reset periodically.
-      currentTopicScore += p4Score;
-      
-      // P3b: Invalid Message Deliveries Penalty (per topic), as in
-      // go-libp2p-pubsub: the counter decays once per decay interval and the
-      // penalty is weight * counter^2. It is kept out of the accumulated
-      // score (see _appliedInvalidPenalty).
-      if (numIntervals > 0 && tStats.decayedInvalidMessageDeliveries > 0) {
-        tStats.decayedInvalidMessageDeliveries *=
-            pow(tParams.invalidMessageDeliveriesDecay, numIntervals);
-        if (tStats.decayedInvalidMessageDeliveries < params.decayToZero) {
-          tStats.decayedInvalidMessageDeliveries = 0;
-        }
-      }
-      invalidPenaltyTotal += _invalidPenaltyFor(tStats, tParams);
-      
-      topicScoresTotal += currentTopicScore;
     }
-    currentRawScore = topicScoresTotal;
+    return ips;
+  }
 
-    // P5: IP Colocation Factor
-    // Applied if the sum of topic scores (currentRawScore) is positive.
-    if (ipColocated && currentRawScore > 0) {
-      currentRawScore *= params.ipColocationFactor;
-      // As per spec, score is not allowed to become negative as a result of P5.
-      // Since ipColocationFactor should be >= 0, this check is mainly for safety.
-      if (currentRawScore < 0) {
-        currentRawScore = 0;
-      }
+  void _refreshIps() {
+    _peerStats.forEach((peer, pstats) {
+      if (!pstats.connected) return;
+      final ips = _ipsOf(peer);
+      _setIps(peer, ips, pstats.ips);
+      pstats.ips = ips;
+    });
+  }
+
+  void _setIps(PeerId peer, List<String> newIps, List<String> oldIps) {
+    for (final ip in newIps) {
+      if (!oldIps.contains(ip)) _peerIPs.putIfAbsent(ip, () => {}).add(peer);
     }
-    
-    // P6: Behavioural Penalty
-    // This is a global penalty not tied to a specific topic.
-    // The `behaviourPenalty` counter accumulates penalties from `addPenalty()`.
-    // We apply decay to the counter itself.
-    final numDecayIntervalsForP6 = (now.difference(lastUpdated).inMilliseconds / params.decayInterval.inMilliseconds).floor();
-    for (int i = 0; i < numDecayIntervalsForP6; i++) {
-        behaviourPenalty = (behaviourPenalty * params.behaviourPenaltyDecay).round(); // Assuming behaviourPenalty is an int counter
+    _removeIps(peer, oldIps.where((ip) => !newIps.contains(ip)));
+  }
+
+  void _removeIps(PeerId peer, Iterable<String> ips) {
+    for (final ip in ips) {
+      final peers = _peerIPs[ip];
+      if (peers == null) continue;
+      peers.remove(peer);
+      if (peers.isEmpty) _peerIPs.remove(ip);
     }
-    
-    double p6PenaltyScore = behaviourPenalty * params.behaviourPenaltyWeight;
-    if (p6PenaltyScore < params.behaviourPenaltyCap) { // cap is negative, so check if score is "more negative"
-      p6PenaltyScore = params.behaviourPenaltyCap;
-    }
-    // P6 is added to the overall score, not just topic scores.
-    // The spec implies P6 is a direct hit on the score.
-
-    // Combine scores:
-    // score (already decayed) = score + topicScoreSumWithP5Factor + P6_penalty + P7_app_score
-    score += currentRawScore + p6PenaltyScore + appSpecificScoreValue;
-
-
-    // Apply score caps and floors
-    score = _clampScore(score);
-
-    // P3b: add the current invalid-message penalty.
-    _applyInvalidPenalty(invalidPenaltyTotal);
-
-    // Update graylist status
-    if (score < params.graylistThreshold) {
-      if (graylistUntil == null) { // Not currently graylisted
-        graylistUntil = now.add(params.graylistDuration);
-      }
-      // If already graylisted, refreshScore doesn't extend it unless score drops further
-      // or specific conditions are met (not detailed here, assume simple threshold).
-    } else {
-      graylistUntil = null; // No longer meets graylist criteria
-    }
-
-    lastUpdated = now;
-    
-    // After calculating scores, reset counters that are subject to decay/refresh for the next period.
-    // This was previously in a separate `resetCounters` method in PeerScore,
-    // but it's often called as part of the refresh cycle.
-    // For now, we'll assume TopicScoreStats.resetCounters() is called appropriately.
-    // And global counters like `behaviourPenalty` are managed by their specific logic.
-    // `invalidMessageDeliveries` (global) is a lifetime counter.
-    // `meshTime` in TopicScoreStats is managed with its quantum.
-
-    // TODO: Call TopicScoreStats.resetCounters() for each topic if appropriate here.
-    // TODO: Decay meshMessageDeliveriesActive in TopicScoreStats - this is handled by its own window logic.
-
-    // After all scores for the period are calculated and `score` is updated,
-    // reset the per-topic counters for the next scoring period.
-    for (final tStats in topicStats.values) {
-        // Reset counters like firstMessageDeliveries, meshMessageDeliveries (if inactive), 
-        // meshFailurePenalty, invalidMessageDeliveries (topic-specific).
-        // meshTime is cumulative for the current P1 calculation window and isn't reset here,
-        // its contribution is based on quanta.
-        tStats.resetCounters();
-    }
-    // Note: Global `invalidMessageDeliveries` (for P6) is a lifetime counter.
-    // `behaviourPenalty` counter decay is handled within P6 calculation.
-
-    _log.fine('PeerScore (${peerId.toBase58()}): Refreshed score. Current: $score, LastUpdated: $lastUpdated');
-  }
-
-  double _clampScore(double value) {
-    if (value > params.scoreMax) return params.scoreMax;
-    if (value < params.scoreMin) return params.scoreMin;
-    return value;
-  }
-
-  double _invalidPenaltyFor(TopicScoreStats tStats, TopicScoreParams tParams) {
-    final counter = tStats.decayedInvalidMessageDeliveries;
-    return tParams.invalidMessageDeliveriesWeight * counter * counter;
-  }
-
-  /// Replaces the P3b penalty in [score] with [penalty], within the score
-  /// caps.
-  void _applyInvalidPenalty(double penalty) {
-    final base = score - _appliedInvalidPenalty;
-    score = _clampScore(base + penalty);
-    _appliedInvalidPenalty = score - base;
-  }
-
-  /// Adds a penalty for misbehavior.
-  void addPenalty(int penalty) {
-    behaviourPenalty += penalty;
-    // TODO: Consider if refreshScore should be called immediately or deferred.
-  }
-
-  /// Resets the behavioral penalty.
-  void resetPenalty() {
-    behaviourPenalty = 0;
-  }
-
-  // TODO: Add methods for:
-  // - addTopicStats(String topic, ...params for specific stats...) // Covered by _getOrAddTopicStats and specific record methods
-  // - addIP(String ip)
-  // - setIPColocated(bool isColocated)
-  // - recordMessageDelivery(...) // Covered by more specific methods below
-  // - recordInvalidMessage(...)
-  // - recordGraft(...)
-  // - recordPrune(...)
-  // - etc., corresponding to events that affect the score.
-
-  /// Records an IP address associated with this peer.
-  void addIP(String ip) {
-    knownIPs.add(ip);
-    // IP colocation status is typically updated by an external process
-    // that checks all peers' IPs.
-  }
-
-  /// Sets the IP colocation status for this peer.
-  /// This is usually called by an external IP colocation detection mechanism.
-  void setIPColocated(bool isColocated) {
-    ipColocated = isColocated;
-  }
-
-  /// Records a GRAFT for a specific topic.
-  void recordGraft(String topic) {
-    final stats = _getOrAddTopicStats(topic);
-    if (stats.inMesh) {
-      return; // Already in mesh
-    }
-    stats.inMesh = true;
-    final now = _clock.now();
-    stats.graftTime = now;
-    // Give the peer a fresh grace period for P1 cap by setting lastSuccessfulDelivery
-    stats.lastSuccessfulDelivery = now; 
-    // meshTime starts accumulating from now.
-  }
-
-  /// Records a PRUNE for a specific topic.
-  void recordPrune(String topic) {
-    final stats = _getOrAddTopicStats(topic);
-    if (!stats.inMesh) {
-      return; // Not in mesh
-    }
-    stats.inMesh = false;
-    if (stats.graftTime != null) {
-      final now = _clock.now();
-      final durationInMesh = now.difference(stats.graftTime!);
-      stats.meshTime += durationInMesh; // Add the session's mesh time
-      // Cap meshTime per scoring interval in refreshScore() using timeInMeshQuantum
-    }
-    stats.graftTime = null;
-    // Other mesh-related stats like meshMessageDeliveries might be reset or decayed here
-    // or in refreshScore, depending on the specific decay logic.
-    // For now, meshMessageDeliveriesActive is reset on its own decay.
-  }
-
-  /// Records the first delivery of a message from this peer for a given topic. (P3a)
-  void recordFirstMessageDelivery(String topic) {
-    final stats = _getOrAddTopicStats(topic);
-    stats.firstMessageDeliveries++;
-    stats.lastSuccessfulDelivery = _clock.now();
-  }
-
-  /// Records a message delivery from this peer while in the mesh for a given topic. (P2)
-  void recordMeshMessageDelivery(String topic) {
-    final stats = _getOrAddTopicStats(topic);
-    if (!stats.inMesh) {
-      return; // Not in mesh, this shouldn't count for P2.
-    }
-    stats.meshMessageDeliveries++;
-    stats.meshMessageDeliveriesActive = true;
-    final now = _clock.now();
-    stats.meshMessageDeliveriesActivation = now;
-    stats.lastSuccessfulDelivery = now;
-  }
-  
-  /// Records a failure to deliver a message that was expected from this peer
-  /// while in the mesh for a given topic. (P2 penalty)
-  void recordMeshMessageFailure(String topic) {
-    final stats = _getOrAddTopicStats(topic);
-    if (!stats.inMesh) {
-      return; // Not in mesh, this penalty doesn't apply.
-    }
-    stats.meshFailurePenalty++;
-  }
-
-  /// Records an invalid message received from this peer on [topic] (P3b).
-  ///
-  /// The P3b penalty takes effect in [score] at once; it then decays at each
-  /// [refreshScore].
-  void recordInvalidMessage(String topic) {
-    final stats = _getOrAddTopicStats(topic);
-    stats.invalidMessageDeliveries++;
-    stats.decayedInvalidMessageDeliveries += 1;
-    invalidMessageDeliveries++; // Global lifetime counter
-
-    // Apply the new P3b penalty now, without decay; refreshScore() decays it.
-    double penalty = 0;
-    for (final entry in topicStats.entries) {
-      penalty += _invalidPenaltyFor(entry.value, params.getTopicParams(entry.key));
-    }
-    _applyInvalidPenalty(penalty);
-  }
-
-  /// Resets counters that are subject to decay or periodic refresh.
-  /// This is typically called after scores are computed in [refreshScore].
-  void resetCounters() {
-    // Reset per-topic counters
-    for (final topicStat in topicStats.values) {
-      topicStat.resetCounters();
-    }
-    // Reset global peer counters (behaviourPenalty is managed by addPenalty/resetPenalty)
-    // invalidMessageDeliveries is a lifetime counter for P6, not reset here.
-    // appSpecificScoreValue is recalculated in refreshScore.
-    // meshTime in TopicScoreStats is also managed within refreshScore based on quantum.
   }
 }

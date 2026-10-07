@@ -50,6 +50,7 @@ void main() {
 
     test('creates new persistent stream for first message to peer', () async {
       final mockStream = MockP2PStream();
+      when(mockStream.protocol()).thenReturn(gossipSubIDv11);
       when(mockStream.id()).thenReturn('stream-1');
       when(mockStream.isClosed).thenReturn(false);
       when(mockStream.isWritable).thenReturn(true);
@@ -73,6 +74,7 @@ void main() {
 
     test('reuses existing stream for multiple messages to same peer', () async {
       final mockStream = MockP2PStream();
+      when(mockStream.protocol()).thenReturn(gossipSubIDv11);
       when(mockStream.id()).thenReturn('stream-1');
       when(mockStream.isClosed).thenReturn(false);
       when(mockStream.isWritable).thenReturn(true);
@@ -103,7 +105,9 @@ void main() {
 
     test('creates separate streams for different peers', () async {
       final mockStream1 = MockP2PStream();
+      when(mockStream1.protocol()).thenReturn(gossipSubIDv11);
       final mockStream2 = MockP2PStream();
+      when(mockStream2.protocol()).thenReturn(gossipSubIDv11);
       
       when(mockStream1.id()).thenReturn('stream-1');
       when(mockStream1.isClosed).thenReturn(false);
@@ -138,7 +142,9 @@ void main() {
 
     test('recreates stream if existing stream is closed', () async {
       final mockStream1 = MockP2PStream();
+      when(mockStream1.protocol()).thenReturn(gossipSubIDv11);
       final mockStream2 = MockP2PStream();
+      when(mockStream2.protocol()).thenReturn(gossipSubIDv11);
       var streamCallCount = 0;
       
       when(mockStream1.id()).thenReturn('stream-1');
@@ -174,6 +180,7 @@ void main() {
 
     test('handles concurrent stream creation for same peer', () async {
       final mockStream = MockP2PStream();
+      when(mockStream.protocol()).thenReturn(gossipSubIDv11);
       final streamCreationCompleter = Completer<MockP2PStream>();
       
       when(mockStream.id()).thenReturn('stream-1');
@@ -204,6 +211,7 @@ void main() {
 
     test('closes stream on peer disconnect', () async {
       final mockStream = MockP2PStream();
+      when(mockStream.protocol()).thenReturn(gossipSubIDv11);
       when(mockStream.id()).thenReturn('stream-1');
       when(mockStream.isClosed).thenReturn(false);
       when(mockStream.isWritable).thenReturn(true);
@@ -225,7 +233,9 @@ void main() {
 
     test('removes and recreates stream after send error', () async {
       final mockStream1 = MockP2PStream();
+      when(mockStream1.protocol()).thenReturn(gossipSubIDv11);
       final mockStream2 = MockP2PStream();
+      when(mockStream2.protocol()).thenReturn(gossipSubIDv11);
       
       when(mockStream1.id()).thenReturn('stream-1');
       when(mockStream1.isClosed).thenReturn(false);
@@ -265,7 +275,9 @@ void main() {
 
     test('closes all streams on protocol close', () async {
       final mockStream1 = MockP2PStream();
+      when(mockStream1.protocol()).thenReturn(gossipSubIDv11);
       final mockStream2 = MockP2PStream();
+      when(mockStream2.protocol()).thenReturn(gossipSubIDv11);
       
       when(mockStream1.id()).thenReturn('stream-1');
       when(mockStream1.isClosed).thenReturn(false);
@@ -312,6 +324,7 @@ void main() {
 
     test('handles rapid successive messages without stream leaks', () async {
       final mockStream = MockP2PStream();
+      when(mockStream.protocol()).thenReturn(gossipSubIDv11);
       when(mockStream.id()).thenReturn('stream-1');
       when(mockStream.isClosed).thenReturn(false);
       when(mockStream.isWritable).thenReturn(true);

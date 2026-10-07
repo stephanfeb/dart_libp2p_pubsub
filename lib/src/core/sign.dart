@@ -109,3 +109,37 @@ Future<bool> verifyMessageSignature(PubSubMessage pubsubMessage) async {
     return false;
   }
 }
+
+/// Whether messages are signed and how signatures are checked, as
+/// go-libp2p-pubsub's `MessageSignaturePolicy`. All nodes of a network must
+/// use compatible policies.
+enum MessageSignaturePolicy {
+  /// Our messages are signed; received messages must carry a valid
+  /// signature. The default.
+  strictSign(sign: true, verify: true),
+
+  /// Our messages are not signed; received messages that carry a signature
+  /// are rejected (and, unless we author messages, so are messages with a
+  /// `from`, `seqno` or `key`). Use with a content-based message ID.
+  strictNoSign(sign: false, verify: true),
+
+  /// Our messages are signed; a received signature is checked if present.
+  /// Deprecated in go-libp2p-pubsub.
+  laxSign(sign: true, verify: false),
+
+  /// Our messages are not signed; a received signature is checked if
+  /// present. Deprecated in go-libp2p-pubsub.
+  laxNoSign(sign: false, verify: false);
+
+  const MessageSignaturePolicy({required bool sign, required bool verify})
+      : mustSign = sign,
+        mustVerify = verify;
+
+  /// Whether we sign our messages and, with [mustVerify], require received
+  /// messages to be signed.
+  final bool mustSign;
+
+  /// Whether the policy is enforced on received messages.
+  final bool mustVerify;
+}
+

@@ -85,7 +85,7 @@ const ControlIHave$json = {
   '1': 'ControlIHave',
   '2': [
     {'1': 'topicID', '3': 1, '4': 1, '5': 9, '10': 'topicID'},
-    {'1': 'messageIDs', '3': 2, '4': 3, '5': 9, '10': 'messageIDs'},
+    {'1': 'messageIDs', '3': 2, '4': 3, '5': 12, '10': 'messageIDs'},
   ],
 };
 
@@ -98,7 +98,7 @@ final $typed_data.Uint8List controlIHaveDescriptor = $convert.base64Decode(
 const ControlIWant$json = {
   '1': 'ControlIWant',
   '2': [
-    {'1': 'messageIDs', '3': 1, '4': 3, '5': 9, '10': 'messageIDs'},
+    {'1': 'messageIDs', '3': 1, '4': 3, '5': 12, '10': 'messageIDs'},
   ],
 };
 
@@ -137,7 +137,7 @@ final $typed_data.Uint8List controlPruneDescriptor = $convert.base64Decode(
 const ControlIDontWant$json = {
   '1': 'ControlIDontWant',
   '2': [
-    {'1': 'messageIDs', '3': 1, '4': 3, '5': 9, '10': 'messageIDs'},
+    {'1': 'messageIDs', '3': 1, '4': 3, '5': 12, '10': 'messageIDs'},
   ],
 };
 

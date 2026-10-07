@@ -232,5 +232,37 @@ void main() {
       expect(output, contains('Received: $testMessage'));
       print('GossipSub Dart→Go interop verified');
     }, timeout: Timeout(Duration(seconds: 60)));
+
+    test('Dart gossips a message (IHAVE), Go requests it (IWANT) and receives it', () async {
+      const testTopic = 'test-interop-gossip';
+      const testMessage = 'delivered by gossip';
+
+      await goServer.startPubSubServer(topic: testTopic);
+      final goPeerId = goServer.peerId;
+
+      final keyPair = await crypto_ed25519.generateEd25519KeyPair();
+      dartHost = await createHost(keyPair, listenAddrs: [MultiAddr('/ip4/127.0.0.1/tcp/0')]);
+      await dartHost!.connect(AddrInfo(goPeerId, [goServer.listenAddr]), context: core_context.Context());
+
+      // No mesh at all (go-libp2p-pubsub's bootstrapper settings) and no
+      // flood publish: the heartbeat prunes Go from our mesh, so our message
+      // can reach Go only through IHAVE gossip and Go's IWANT.
+      final router = GossipSubRouter(
+        params: GossipSubParams(D: 0, DLow: 0, DHigh: 0, DOut: 0, DScore: 0, floodPublish: false),
+      );
+      dartPubSub = PubSub(dartHost!, router, privateKey: keyPair.privateKey);
+      await dartPubSub!.start();
+      dartPubSub!.subscribe(testTopic);
+
+      // Go GRAFTs us; our next heartbeat PRUNEs it (with a backoff).
+      await Future.delayed(const Duration(seconds: 4));
+      expect(router.mesh[testTopic], isEmpty, reason: 'Go must not be in our mesh');
+
+      await dartPubSub!.publish(testTopic, Uint8List.fromList(testMessage.codeUnits));
+
+      final output = await goServer.waitForOutput('Received: $testMessage', timeout: const Duration(seconds: 15));
+      expect(output, contains('Received: $testMessage'));
+      expect(router.mesh[testTopic], isEmpty, reason: 'the message did not go through the mesh');
+    }, timeout: const Timeout(Duration(seconds: 60)));
   });
 }

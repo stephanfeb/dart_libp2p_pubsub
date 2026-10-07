@@ -1,18 +1,40 @@
+import 'dart:convert';
 import 'dart:typed_data';
-import 'package:dart_libp2p/core/peer/peer_id.dart';
 import '../pb/rpc.pb.dart' as pb;
 
-/// A function that computes a unique ID for a PubSub message.
+/// A function that computes the ID of a PubSub message, as go-libp2p-pubsub's
+/// `MsgIdFunction`.
+///
+/// Message IDs are binary: they travel as `bytes` in IHAVE, IWANT and
+/// IDONTWANT, and nodes of a network must compute the same ID for a message.
+/// A Dart ID is a "byte string": each code unit is one byte (0-255), as
+/// [messageIdFromBytes] builds. A function that returns other characters gets
+/// its ID UTF-8 encoded by [normalizeMessageId].
 typedef MessageIdFn = String Function(pb.Message message);
 
-/// The default message ID function.
-/// It generates an ID by concatenating the hex string representation of
-/// the message's `from` field (PeerId bytes) and `seqno` field (sequence number bytes).
-String defaultMessageIdFn(pb.Message message) {
-  final fromHex = message.from.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-  final seqnoHex = message.seqno.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-  return '$fromHex-$seqnoHex';
+/// The default message ID, as go-libp2p-pubsub's `DefaultMsgIdFn`: the bytes
+/// of the message's `from` followed by the bytes of its `seqno`.
+String defaultMessageIdFn(pb.Message message) =>
+    messageIdFromBytes([...message.from, ...message.seqno]);
+
+/// The message ID whose bytes are [bytes].
+String messageIdFromBytes(List<int> bytes) => String.fromCharCodes(bytes);
+
+/// The bytes of the message ID [id], as sent on the wire.
+Uint8List messageIdToBytes(String id) => Uint8List.fromList(normalizeMessageId(id).codeUnits);
+
+/// [id] as a byte string: unchanged if each of its code units is a byte,
+/// otherwise its UTF-8 encoding.
+String normalizeMessageId(String id) {
+  for (final unit in id.codeUnits) {
+    if (unit > 0xff) return String.fromCharCodes(utf8.encode(id));
+  }
+  return id;
 }
+
+/// [id] in hex, for logs.
+String messageIdToHex(String id) =>
+    id.codeUnits.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 
 /// Generates unique sequence numbers for outgoing messages.
 ///

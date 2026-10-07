@@ -51,7 +51,8 @@ class PubSubMessage {
 
   @override
   String toString() {
-    return 'PubSubMessage{from: ${from.toBase58()}, topic: $topic, seqno: ${seqno.toString()}, receivedFrom: ${receivedFrom?.toBase58() ?? "local"}}';
+    final author = rpcMessage.from.isEmpty ? 'none' : from.toBase58();
+    return 'PubSubMessage{from: $author, topic: $topic, seqno: ${seqno.toString()}, receivedFrom: ${receivedFrom?.toBase58() ?? "local"}}';
   }
 
   // It might be useful to have factory constructors or methods, e.g.:

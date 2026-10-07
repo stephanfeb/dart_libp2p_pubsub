@@ -20,14 +20,12 @@ import '../tracing/tracer.dart'; // For EventTracer
 // NoOpEventTracer is in tracer.dart, so json_tracer.dart import might not be needed for default.
 // import '../tracing/impl/json_tracer.dart'; 
 import '../pb/trace.pb.dart' as trace_pb; // For trace event types
-import '../gossipsub/score.dart'; // For PeerScore
-import '../gossipsub/score_params.dart'; // For PeerScoreParams
 // Ensure MessageIdFunction is available from midgen
 import '../util/midgen.dart';
-import 'package:clock/clock.dart';
 import 'package:logging/logging.dart';
 
 export 'validation.dart' show ValidationResult;
+export 'sign.dart' show MessageSignaturePolicy;
 
 final _log = Logger('PubSub');
 
@@ -81,10 +79,16 @@ const int defaultValidatorConcurrency = 1024;
 /// Trace reasons for dropped messages, as in go-libp2p-pubsub.
 const String _rejectInvalidStructure = 'invalid message';
 const String _rejectInvalidSignature = 'invalid signature';
+const String _rejectMissingSignature = 'missing signature';
+const String _rejectUnexpectedSignature = 'unexpected signature';
+const String _rejectUnexpectedAuthInfo = 'unexpected auth info';
+const String _rejectSelfOrigin = 'self originated message';
 const String _rejectValidationFailed = 'validation failed';
 const String _rejectValidationIgnored = 'validation ignored';
 const String _rejectValidationThrottled = 'validation throttled';
 const String _rejectValidationTimeout = 'validation timeout';
+/// Not a reject reason: the message was marked seen by another copy first.
+const String _duplicate = 'duplicate';
 
 class _TopicValidatorEntry {
   final TopicValidator validator;
@@ -103,7 +107,6 @@ class PubSub {
   final Host host;
   final Router router;
   final EventTracer tracer;
-  final PeerScoreParams scoreParams;
 
   /// The default time limit for one run of a [TopicValidator].
   /// [Duration.zero] means no limit.
@@ -113,6 +116,17 @@ class PubSub {
   /// all topics.
   final int validateThrottle;
 
+  /// The maximum size of one RPC on the wire, in bytes.
+  final int maxMessageSize;
+
+  final MessageIdFn _messageIdFn;
+
+  /// How messages are signed and verified.
+  final MessageSignaturePolicy signaturePolicy;
+
+  /// Whether our messages omit `from` and `seqno`.
+  final bool noAuthor;
+
   final PrivateKey? _privateKey; // For signing outgoing messages
   late final PubSubProtocol _comms;
 
@@ -121,11 +135,14 @@ class PubSub {
   PeerNotifier? _peerNotifier;
   late final MessageIdGenerator _idGenerator; // For generating sequence numbers
 
-  /// Manages scores for known peers.
-  final Map<PeerId, PeerScore> peerScores = {};
+  /// The connected peers that speak pubsub: those that opened a pubsub
+  /// stream to us or accepted ours. They are added to the router.
+  final Set<PeerId> _peers = {};
 
-  /// When the score of each disconnected peer is deleted.
-  final Map<PeerId, DateTime> _scoreExpiry = {};
+  /// The peers we are sending the hello packet to. Subscription changes are
+  /// sent to them too, as go-libp2p-pubsub queues RPCs for a new peer before
+  /// its stream is open: the hello may have been built before the change.
+  final Set<PeerId> _greeting = {};
 
   PubSubProtocol get comms => _comms;
 
@@ -141,23 +158,39 @@ class PubSub {
   /// no limit. [validateThrottle] is the maximum number of messages in
   /// validation at the same time, over all topics; when it is reached, new
   /// messages are dropped as [ValidationResult.ignore].
+  ///
+  /// [maxMessageSize] is the maximum size of one RPC on the wire, in bytes,
+  /// as go-libp2p-pubsub's `WithMaxMessageSize` (default 1 MiB). All nodes
+  /// of a network should use the same value.
+  ///
+  /// [signaturePolicy] is go-libp2p-pubsub's `WithMessageSignaturePolicy`
+  /// (default [MessageSignaturePolicy.strictSign]). [noAuthor] omits `from`
+  /// and `seqno` from our messages and turns off signing, as
+  /// `WithNoAuthor`; use it with a content-based [messageIdFn].
+  ///
+  /// [messageIdFn] computes message IDs, as go-libp2p-pubsub's
+  /// `WithMessageIdFn` (default [defaultMessageIdFn], which is Go's
+  /// `DefaultMsgIdFn`). All nodes of a network must use the same function.
   // TODO: Consider making PubSub an async initializable class if attach needs to be awaited.
   PubSub(this.host, this.router, {
     PrivateKey? privateKey,
     EventTracer? tracer,
-    PeerScoreParams? scoreParams,
     this.validatorTimeout = defaultValidatorTimeout,
     this.validateThrottle = defaultValidateThrottle,
+    this.maxMessageSize = defaultMaxMessageSize,
+    MessageIdFn messageIdFn = defaultMessageIdFn,
+    MessageSignaturePolicy signaturePolicy = MessageSignaturePolicy.strictSign,
+    this.noAuthor = false,
   }) :
+    signaturePolicy = noAuthor && signaturePolicy.mustSign
+        ? (signaturePolicy.mustVerify ? MessageSignaturePolicy.strictNoSign : MessageSignaturePolicy.laxNoSign)
+        : signaturePolicy,
+    _messageIdFn = messageIdFn,
     _privateKey = privateKey,
     this.tracer = tracer ?? const NoOpEventTracer(),
-    this.scoreParams = scoreParams ?? PeerScoreParams.defaultParams,
     _idGenerator = MessageIdGenerator() { // Initialize the ID generator
-    _comms = PubSubProtocol(host, _handleRpc);
-    _comms.onNewInboundPeer = (peerId) {
-      // When a new GossipSub peer connects, send our subscriptions
-      announceSubscriptionsTo(peerId);
-    };
+    _comms = PubSubProtocol(host, _handleRpc, maxMessageSize: maxMessageSize, protocols: router.protocols);
+    _comms.onNewInboundPeer = _handleInboundPeer;
     // It's important that the router is attached so it can also set up its
     // own protocol handlers or react to PubSub initialization.
     router.attach(this).then((_) {
@@ -172,16 +205,29 @@ class PubSub {
   }
 
   Future<void> _handleRpc(PeerId peerId, pb.RPC rpc) async {
+    // As go-libp2p-pubsub: the router decides whether to handle the RPCs of
+    // the peer at all (GossipSub ignores graylisted peers).
+    switch (router.acceptFrom(peerId)) {
+      case AcceptStatus.none:
+        _log.fine('PubSub: Ignoring RPC from ${peerId.toBase58()}, refused by the router.');
+        return;
+      case AcceptStatus.control:
+        rpc = pb.RPC()
+          ..subscriptions.addAll(rpc.subscriptions)
+          ..control = rpc.control;
+      case AcceptStatus.all:
+        break;
+    }
     // Let the router process the RPC first.
     // The router is responsible for validation, mcache, forwarding, and handling control messages.
     // It returns the set of message IDs that were accepted (not duplicates or rejected).
     final acceptedIds = await router.handleRpc(peerId, rpc);
 
-    // Only deliver messages that the router actually accepted.
+    // Only deliver messages that the router actually accepted, once each.
     if (rpc.publish.isNotEmpty && acceptedIds.isNotEmpty) {
       for (final msgProto in rpc.publish) {
         final msgIdStr = messageIdFn(msgProto);
-        if (!acceptedIds.contains(msgIdStr)) continue;
+        if (!acceptedIds.remove(msgIdStr)) continue;
 
         final pubSubMessage = PubSubMessage(rpcMessage: msgProto, receivedFrom: peerId);
         deliverReceivedMessage(pubSubMessage);
@@ -192,8 +238,11 @@ class PubSub {
   /// Stores subscriptions, mapping topic strings to a list of [Subscription] objects.
   final Map<String, List<Subscription>> _subscriptions = {};
 
-  /// Provides the function used to generate message IDs, as expected by routers.
-  MessageIdFn get messageIdFn => defaultMessageIdFn;
+  /// The function that computes message IDs. Its IDs are byte strings (see
+  /// [MessageIdFn]).
+  MessageIdFn get messageIdFn => _normalizedMessageId;
+
+  String _normalizedMessageId(pb.Message message) => normalizeMessageId(_messageIdFn(message));
 
   /// Subscribes to a given topic.
   ///
@@ -239,34 +288,54 @@ class PubSub {
     return subscription;
   }
 
-  /// Sends a SUB/UNSUB RPC to all connected peers.
+  /// Sends a SUB/UNSUB RPC to the pubsub peers.
   void _announceSubscription(String topic, bool subscribe) {
     final subOpt = pb.RPC_SubOpts()
       ..subscribe = subscribe
       ..topicid = topic;
     final rpc = pb.RPC()..subscriptions.add(subOpt);
 
-    final peers = host.network.peers;
-    for (final peerId in peers) {
-      _comms.sendRpc(peerId, rpc, gossipSubIDv11).catchError((e) {
+    for (final peerId in {..._peers, ..._greeting}) {
+      _comms.sendRpc(peerId, rpc, router.protocols.first).catchError((e) {
         _log.fine('PubSub: Error announcing subscription to ${peerId.toBase58()}: $e');
       });
     }
   }
 
-  /// Sends all current subscriptions to a specific peer.
-  /// Called when a new GossipSub peer connects.
+  /// Sends the hello packet (all our subscriptions, possibly none) to
+  /// [peerId], as go-libp2p-pubsub does to each new peer. If the peer
+  /// accepts the pubsub stream, it is added to the router.
   void announceSubscriptionsTo(PeerId peerId) {
-    if (_subscriptions.isEmpty) return;
     final rpc = pb.RPC();
     for (final topic in _subscriptions.keys) {
       rpc.subscriptions.add(pb.RPC_SubOpts()
         ..subscribe = true
         ..topicid = topic);
     }
-    _comms.sendRpc(peerId, rpc, gossipSubIDv11).catchError((e) {
-      _log.fine('PubSub: Error sending subscriptions to ${peerId.toBase58()}: $e');
-    });
+    _greeting.add(peerId);
+    _comms.sendRpc(peerId, rpc, router.protocols.first).then((_) {
+      _addPeer(peerId, _comms.protocolOf(peerId) ?? router.protocols.first);
+    }).catchError((e) {
+      // Typically a peer that does not speak pubsub.
+      _log.fine('PubSub: Could not open a pubsub stream to ${peerId.toBase58()}: $e');
+    }).whenComplete(() => _greeting.remove(peerId));
+  }
+
+  /// A peer opened a pubsub stream to us: it speaks pubsub.
+  void _handleInboundPeer(PeerId peerId, String protocol) {
+    final isNew = !_peers.contains(peerId);
+    _addPeer(peerId, protocol);
+    // Make sure it has our subscriptions, if we have not greeted it yet.
+    if (isNew) announceSubscriptionsTo(peerId);
+  }
+
+  void _addPeer(PeerId peerId, String protocol) {
+    if (!host.network.peers.contains(peerId)) return; // Gone already.
+    if (_peers.add(peerId)) {
+      router.addPeer(peerId, protocol).catchError((e) {
+        _log.warning('PubSub: Error adding peer ${peerId.toBase58()} to the router: $e');
+      });
+    }
   }
 
   /// Unsubscribes all listeners from a given topic.
@@ -363,7 +432,16 @@ class PubSub {
   /// [TopicValidator]. The first result that is not
   /// [ValidationResult.accept] is returned. A dropped message that was
   /// received from a peer is traced as REJECT_MESSAGE with the reason.
-  Future<ValidationResult> validateMessage(PubSubMessage message) async {
+  ///
+  /// [markSeen], if given, is called once the signature has been verified,
+  /// before the validators run, as in go-libp2p-pubsub: it marks the
+  /// message's ID as seen and returns `false` if it was seen already, in
+  /// which case validation stops with [ValidationResult.ignore] and nothing
+  /// is traced (the caller handles the duplicate). Marking a message seen
+  /// only after its signature is verified keeps a forged copy from blocking
+  /// the genuine message. A router can tell a message that failed the
+  /// structure or signature checks by [markSeen] not having been called.
+  Future<ValidationResult> validateMessage(PubSubMessage message, {bool Function()? markSeen}) async {
     if (_activeValidations >= validateThrottle) {
       _log.fine('PubSub: validation throttled ($validateThrottle active); dropping message on "${message.topic}".');
       _traceReject(message, _rejectValidationThrottled);
@@ -371,7 +449,8 @@ class PubSub {
     }
     _activeValidations++;
     try {
-      final (result, reason) = await _runValidation(message);
+      final (result, reason) = await _runValidation(message, markSeen);
+      if (reason == _duplicate) return result;
       if (result != ValidationResult.accept) {
         _traceReject(message, reason!);
       }
@@ -381,20 +460,61 @@ class PubSub {
     }
   }
 
-  Future<(ValidationResult, String?)> _runValidation(PubSubMessage message) async {
-    if (validateMessageStructure(message) != ValidationResult.accept) {
+  /// The checks of go-libp2p-pubsub's `checkSigningPolicy` and its
+  /// self-origin check, for a received message: the reject reason, or null.
+  String? _checkSigningPolicy(PubSubMessage message) {
+    final msg = message.rpcMessage;
+    final received = message.receivedFrom != null;
+    if (!received) return null;
+    if (msg.from.isNotEmpty && _sameBytes(msg.from, host.id.toBytes())) {
+      return _rejectSelfOrigin;
+    }
+    if (!signaturePolicy.mustVerify) return null;
+    if (signaturePolicy.mustSign) {
+      if (msg.signature.isEmpty) return _rejectMissingSignature;
+    } else {
+      if (msg.signature.isNotEmpty) return _rejectUnexpectedSignature;
+      // Not authoring messages: no author data is expected either.
+      if (noAuthor && (msg.seqno.isNotEmpty || msg.from.isNotEmpty || msg.key.isNotEmpty)) {
+        return _rejectUnexpectedAuthInfo;
+      }
+    }
+    return null;
+  }
+
+  static bool _sameBytes(List<int> a, List<int> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
+  Future<(ValidationResult, String?)> _runValidation(PubSubMessage message, bool Function()? markSeen) async {
+    final policyViolation = _checkSigningPolicy(message);
+    if (policyViolation != null) return (ValidationResult.reject, policyViolation);
+    if (validateMessageStructure(message,
+            maxMessageSize: maxMessageSize, requireAuthor: signaturePolicy == MessageSignaturePolicy.strictSign) !=
+        ValidationResult.accept) {
       return (ValidationResult.reject, _rejectInvalidStructure);
     }
-    ValidationResult signatureResult;
-    try {
-      signatureResult = await validateMessageSignature(message);
-    } catch (e) {
-      // For example, a 'from' field that is not a valid peer ID.
-      _log.fine('PubSub: signature check failed with an error: $e');
-      signatureResult = ValidationResult.reject;
+    // As go-libp2p-pubsub: a signature, if present, is verified (its
+    // presence is required by the policy check above).
+    if (message.rpcMessage.signature.isNotEmpty) {
+      ValidationResult signatureResult;
+      try {
+        signatureResult = await validateMessageSignature(message);
+      } catch (e) {
+        // For example, a 'from' field that is not a valid peer ID.
+        _log.fine('PubSub: signature check failed with an error: $e');
+        signatureResult = ValidationResult.reject;
+      }
+      if (signatureResult != ValidationResult.accept) {
+        return (ValidationResult.reject, _rejectInvalidSignature);
+      }
     }
-    if (signatureResult != ValidationResult.accept) {
-      return (ValidationResult.reject, _rejectInvalidSignature);
+    if (markSeen != null && !markSeen()) {
+      return (ValidationResult.ignore, _duplicate);
     }
 
     final topic = message.topic;
@@ -453,7 +573,7 @@ class PubSub {
     final from = message.receivedFrom;
     if (from == null) return; // Local publish: publish() logs the drop.
     final rejectTrace = trace_pb.TraceEvent_RejectMessage()
-      ..messageID = messageIdFn(message.rpcMessage).codeUnits
+      ..messageID = messageIdToBytes(messageIdFn(message.rpcMessage))
       ..receivedFrom = from.toBytes()
       ..topic = message.topic
       ..reason = reason;
@@ -478,25 +598,34 @@ class PubSub {
     // TODO: Get local PeerId (e.g., from this.host.id.toBytes())
     // TODO: Implement sequence number generation (e.g., MidSN from go-libp2p-pubsub) - Done via MessageIdGenerator
     
-    final localPeerIdBytes = host.id.toBytes(); // Assuming host.id returns PeerId, and PeerId has toBytes()
-    final seqno = _idGenerator.nextSeqno(); // Use MessageIdGenerator
-
+    // As go-libp2p-pubsub's Topic.Publish: the author and a sequence
+    // number, unless noAuthor, and a signature if the policy signs.
     final pbMsg = pb.Message()
-      ..from = localPeerIdBytes
       ..data = data
-      ..seqno = seqno
       ..topic = topic;
-
-    // Validation requires a signature (strict signing), so sign every message.
-    // Without an explicit privateKey, use the host's own key from its
-    // peerstore, as go-libp2p-pubsub does.
-    final signingKey = _privateKey ?? await host.peerStore.keyBook.privKey(host.id);
-    if (signingKey == null) {
-      throw StateError(
-          'PubSub: cannot sign messages: no privateKey was given and the '
-          'peerstore holds no private key for ${host.id.toBase58()}');
+    if (!noAuthor) {
+      pbMsg
+        ..from = host.id.toBytes()
+        ..seqno = _idGenerator.nextSeqno();
     }
-    await signMessage(pbMsg, signingKey);
+    if (signaturePolicy.mustSign) {
+      // Without an explicit privateKey, use the host's own key from its
+      // peerstore, as go-libp2p-pubsub does.
+      final signingKey = _privateKey ?? await host.peerStore.keyBook.privKey(host.id);
+      if (signingKey == null) {
+        throw StateError(
+            'PubSub: cannot sign messages: no privateKey was given and the '
+            'peerstore holds no private key for ${host.id.toBase58()}');
+      }
+      await signMessage(pbMsg, signingKey);
+    }
+
+    // The message must fit in one RPC, or no peer would accept it.
+    final rpcSize = (pb.RPC()..publish.add(pbMsg)).writeToBuffer().length;
+    if (rpcSize > maxMessageSize) {
+      throw ArgumentError.value(data.length, 'data',
+          'message of $rpcSize bytes exceeds the maximum message size of $maxMessageSize bytes');
+    }
 
     final pubSubMessage = PubSubMessage(
       rpcMessage: pbMsg,
@@ -513,8 +642,7 @@ class PubSub {
     }
 
     // Trace the publish event
-    final String msgIdStr = defaultMessageIdFn(pbMsg); // Use from midgen.dart
-    final List<int> msgIdBytes = msgIdStr.codeUnits; // UTF-8 bytes of the string ID
+    final List<int> msgIdBytes = messageIdToBytes(messageIdFn(pbMsg));
 
     final publishMsgTrace = trace_pb.TraceEvent_PublishMessage()
       ..messageID = msgIdBytes
@@ -552,8 +680,14 @@ class PubSub {
       _peerNotifier = PeerNotifier(host)
         // As in go-libp2p-pubsub, each side sends its subscriptions to a new
         // peer, so that both know which topics they share.
-        ..onPeerConnected(announceSubscriptionsTo)
+        ..onPeerConnected((peerId) {
+          if (!_peers.contains(peerId)) announceSubscriptionsTo(peerId);
+        })
         ..onPeerDisconnected(router.removePeer);
+      // Greet the peers connected before start, as go-libp2p-pubsub does.
+      for (final peerId in host.network.peers) {
+        if (!_peers.contains(peerId)) announceSubscriptionsTo(peerId);
+      }
     }
     // _comms is started implicitly by its constructor (registers handlers).
     _log.fine('PubSub: Started successfully.');
@@ -597,72 +731,12 @@ class PubSub {
     }
   }
 
-  // --- Peer Score Management ---
-
-  /// Called by the router when a peer connects and supports the pubsub protocol.
-  void addPeer(PeerId peerId, String protocolId) {
-    // Router also calls its own addPeer. This is for PubSub's internal management if needed,
-    // like initializing scores.
-    if (!peerScores.containsKey(peerId)) {
-      peerScores[peerId] = PeerScore(peerId, scoreParams);
-      _log.fine('PubSub: Initialized score for new peer ${peerId.toBase58()}');
-    }
-  }
-
-  /// Called by the router when a peer disconnects.
-  ///
-  /// The peer's score is kept for [PeerScoreParams.retainScore], so a peer
-  /// cannot clear its penalties by reconnecting.
+  /// Called by the router when a peer disconnects: closes the stream to it.
   void removePeer(PeerId peerId) {
-    // Router also calls its own removePeer. This is for PubSub's internal cleanup.
-    // Close the persistent stream to this peer
+    _peers.remove(peerId);
     _comms.closePeerStream(peerId).catchError((e) {
       _log.fine('PubSub: Error closing stream to ${peerId.toBase58()}: $e');
     });
-    
     _log.fine('PubSub: Removed disconnected peer ${peerId.toBase58()}');
-  }
-
-  /// Retrieves the current score for a given peer.
-  /// If the peer is unknown, creates a new score entry with neutral initial score.
-  /// For GossipSub, it's important that peers have a score entry.
-  double? getPeerScore(PeerId peerId) {
-    final peerScoreInstance = peerScores.putIfAbsent(peerId, () {
-      _log.fine('PubSub: Peer ${peerId.toBase58()} not found in scores, creating new entry with neutral score.');
-      return PeerScore(peerId, scoreParams);
-    });
-    return peerScoreInstance.score;
-  }
-
-  /// Allows the router (or other components) to access the PeerScore object directly
-  /// to record specific scoring events.
-  PeerScore? getPeerScoreObject(PeerId peerId) {
-     return peerScores.putIfAbsent(peerId, () {
-      _log.fine('PubSub: Peer ${peerId.toBase58()} not found in scores, creating new entry for object access.');
-      return PeerScore(peerId, scoreParams);
-    });
-  }
-
-  /// Periodically called (e.g., by GossipSubRouter's heartbeat) to refresh scores.
-  void refreshScores() {
-    // As in go-libp2p-pubsub, the score of a disconnected peer is kept for
-    // PeerScoreParams.retainScore, then deleted. The connected peers are read
-    // from the network, which reports them reliably, unlike disconnects.
-    final now = clock.now();
-    final connected = host.network.peers.toSet();
-    peerScores.removeWhere((peerId, _) {
-      if (connected.contains(peerId)) {
-        _scoreExpiry.remove(peerId);
-        return false;
-      }
-      final expiry = _scoreExpiry.putIfAbsent(peerId, () => now.add(scoreParams.retainScore));
-      if (now.isBefore(expiry)) return false;
-      _scoreExpiry.remove(peerId);
-      _log.fine('PubSub: Deleted the score of ${peerId.toBase58()}, disconnected for ${scoreParams.retainScore}');
-      return true;
-    });
-    for (final peerScore in peerScores.values) {
-      peerScore.refreshScore();
-    }
   }
 }

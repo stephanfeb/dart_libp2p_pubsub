@@ -31,6 +31,9 @@ Future<_Node> _createNode(
   TestNetworkManager manager, {
   int validateThrottle = defaultValidateThrottle,
   GossipSubParams? params,
+  MessageSignaturePolicy signaturePolicy = MessageSignaturePolicy.strictSign,
+  bool noAuthor = false,
+  MessageIdFn messageIdFn = defaultMessageIdFn,
 }) async {
   final keyPair = await generateEd25519KeyPair();
   final peerId = PeerId.fromPublicKey(keyPair.publicKey);
@@ -38,13 +41,35 @@ Future<_Node> _createNode(
   (host.network as MockNetwork).manager = manager;
   manager.registerNetwork(peerId, host.network as MockNetwork);
 
-  final router = GossipSubRouter(params: params);
+  final router = GossipSubRouter(
+      params: params, scoreParams: _scoreParams, scoreThresholds: _thresholds);
   final pubsub = PubSub(host, router,
-      privateKey: keyPair.privateKey, validateThrottle: validateThrottle);
+      privateKey: keyPair.privateKey,
+      validateThrottle: validateThrottle,
+      signaturePolicy: signaturePolicy,
+      noAuthor: noAuthor,
+      messageIdFn: messageIdFn);
   await pubsub.start();
   await router.start();
   return _Node(host, pubsub, router, keyPair);
 }
+
+/// Scores invalid messages on the test topic: -1 per invalid message
+/// squared, as the old default.
+final _scoreParams = PeerScoreParams(topics: {
+  'validation-topic': TopicScoreParams(
+    topicWeight: 1,
+    invalidMessageDeliveriesWeight: -1,
+    invalidMessageDeliveriesDecay: scoreParameterDecay(const Duration(hours: 1)),
+  ),
+});
+
+const _thresholds = PeerScoreThresholds(
+    gossipThreshold: -10, publishThreshold: -50, graylistThreshold: -80);
+
+/// The invalid message deliveries of [peer] counted by [node].
+double _invalid(_Node node, PeerId peer) =>
+    node.router.score!.snapshot(peer)?.topics['validation-topic']?.invalidMessageDeliveries ?? 0;
 
 int _seq = 0;
 
@@ -67,9 +92,11 @@ Future<pb.Message> _signedMessage(
 /// subscribers in the same way.
 Future<Set<String>> _receive(
     _Node receiver, _Node sender, pb.Message msg) async {
+  // The sender speaks pubsub, as if it had opened a stream.
+  await receiver.router.addPeer(sender.id, '/meshsub/1.1.0');
   final accepted =
       await receiver.router.handleRpc(sender.id, pb.RPC()..publish.add(msg));
-  if (accepted.contains(defaultMessageIdFn(msg))) {
+  if (accepted.contains(receiver.pubsub.messageIdFn(msg))) {
     receiver.pubsub.deliverReceivedMessage(
         PubSubMessage(rpcMessage: msg, receivedFrom: sender.id));
   }
@@ -94,9 +121,16 @@ void main() {
 
   Future<_Node> node(
       {int validateThrottle = defaultValidateThrottle,
-      GossipSubParams? params}) async {
+      GossipSubParams? params,
+      MessageSignaturePolicy signaturePolicy = MessageSignaturePolicy.strictSign,
+      bool noAuthor = false,
+      MessageIdFn messageIdFn = defaultMessageIdFn}) async {
     final n = await _createNode(manager,
-        validateThrottle: validateThrottle, params: params);
+        validateThrottle: validateThrottle,
+        params: params,
+        signaturePolicy: signaturePolicy,
+        noAuthor: noAuthor,
+        messageIdFn: messageIdFn);
     nodes.add(n);
     return n;
   }
@@ -105,9 +139,9 @@ void main() {
     late _Node a, b, c;
 
     setUp(() async {
-      // A sends no IHAVE gossip (DLazy 0), so C can get A's message only
-      // through B.
-      a = await node(params: GossipSubParams(DLazy: 0));
+      // A sends no IHAVE gossip (DLazy 0) and does not flood publish, so C
+      // can get A's message only through B.
+      a = await node(params: GossipSubParams(DLazy: 0, floodPublish: false));
       b = await node();
       c = await node();
 
@@ -141,11 +175,7 @@ void main() {
       expect(c.received, hasLength(1));
       expect(c.received.single.receivedFrom, b.id);
       expect(
-          b.pubsub
-                  .getPeerScoreObject(a.id)!
-                  .topicStats[topic]
-                  ?.invalidMessageDeliveries ??
-              0,
+          _invalid(b, a.id),
           0);
     });
 
@@ -162,11 +192,9 @@ void main() {
       expect(seenFrom, a.id);
       expect(b.received, isEmpty);
       expect(c.received, isEmpty);
-      final aScore = b.pubsub.getPeerScoreObject(a.id)!;
-      expect(aScore.topicStats[topic]!.invalidMessageDeliveries, 1);
-      expect(aScore.topicStats[topic]!.decayedInvalidMessageDeliveries, 1.0);
-      // Default weight -1 * 1^2.
-      expect(b.pubsub.getPeerScore(a.id), closeTo(-1.0, 1e-9));
+      expect(_invalid(b, a.id), 1);
+      // Weight -1 * 1^2, topic weight 1.
+      expect(b.router.score!.score(a.id), closeTo(-1.0, 1e-9));
     });
 
     test('ignore: C never sees the message and A is not penalised', () async {
@@ -177,13 +205,9 @@ void main() {
       expect(b.received, isEmpty);
       expect(c.received, isEmpty);
       expect(
-          b.pubsub
-                  .getPeerScoreObject(a.id)!
-                  .topicStats[topic]
-                  ?.invalidMessageDeliveries ??
-              0,
+          _invalid(b, a.id),
           0);
-      expect(b.pubsub.getPeerScore(a.id), 0.0);
+      expect(b.router.score!.score(a.id), 0.0);
     });
 
     test('async validator: B waits for the result before it forwards',
@@ -200,10 +224,7 @@ void main() {
       expect(b.received.map((m) => String.fromCharCodes(m.data)), ['good']);
       expect(c.received.map((m) => String.fromCharCodes(m.data)), ['good']);
       expect(
-          b.pubsub
-              .getPeerScoreObject(a.id)!
-              .topicStats[topic]!
-              .invalidMessageDeliveries,
+          _invalid(b, a.id),
           1);
     });
 
@@ -223,10 +244,7 @@ void main() {
       expect(b.received.map((m) => String.fromCharCodes(m.data)), ['ham']);
       expect(c.received.map((m) => String.fromCharCodes(m.data)), ['ham']);
       expect(
-          b.pubsub
-              .getPeerScoreObject(a.id)!
-              .topicStats[topic]!
-              .invalidMessageDeliveries,
+          _invalid(b, a.id),
           1);
     });
 
@@ -287,16 +305,10 @@ void main() {
       expect(await _receive(receiver, other, msg), isEmpty);
       expect(calls, 1);
       expect(
-          receiver.pubsub
-              .getPeerScoreObject(sender.id)!
-              .topicStats[topic]!
-              .invalidMessageDeliveries,
+          _invalid(receiver, sender.id),
           1);
       expect(
-          receiver.pubsub
-              .getPeerScoreObject(other.id)!
-              .topicStats[topic]!
-              .invalidMessageDeliveries,
+          _invalid(receiver, other.id),
           1);
     });
 
@@ -338,11 +350,7 @@ void main() {
       expect(sw.elapsed, lessThan(const Duration(seconds: 2)));
       expect(receiver.received, isEmpty);
       expect(
-          receiver.pubsub
-                  .getPeerScoreObject(sender.id)!
-                  .topicStats[topic]
-                  ?.invalidMessageDeliveries ??
-              0,
+          _invalid(receiver, sender.id),
           0);
     });
 
@@ -372,11 +380,7 @@ void main() {
 
       expect(await _receive(receiver, sender, msg), isEmpty);
       expect(
-          receiver.pubsub
-                  .getPeerScoreObject(sender.id)!
-                  .topicStats[topic]
-                  ?.invalidMessageDeliveries ??
-              0,
+          _invalid(receiver, sender.id),
           0);
     });
 
@@ -404,11 +408,7 @@ void main() {
       expect(await results[1], hasLength(1));
       expect(calls, 2);
       expect(
-          receiver.pubsub
-                  .getPeerScoreObject(sender.id)!
-                  .topicStats[topic]
-                  ?.invalidMessageDeliveries ??
-              0,
+          _invalid(receiver, sender.id),
           0);
     });
 
@@ -446,10 +446,7 @@ void main() {
       expect(await _receive(receiver, sender, msg), isEmpty);
       expect(calls, 0);
       expect(
-          receiver.pubsub
-              .getPeerScoreObject(sender.id)!
-              .topicStats[topic]!
-              .invalidMessageDeliveries,
+          _invalid(receiver, sender.id),
           1);
     });
 
@@ -468,4 +465,111 @@ void main() {
       expect(await _receive(receiver, sender, msg), hasLength(1));
     });
   });
+
+  group('Seen cache and signatures', () {
+    late _Node receiver, sender, attacker;
+
+    setUp(() async {
+      receiver = await node();
+      sender = await node();
+      attacker = await node();
+    });
+
+    test('a forged copy with a bad signature does not block the genuine message', () async {
+      final genuine = await _signedMessage(sender, topic, [1, 2, 3]);
+      // Same from and seqno, so the same ID, but a different payload.
+      final forged = pb.Message()
+        ..mergeFromMessage(genuine)
+        ..data = [6, 6, 6];
+
+      expect(await _receive(receiver, attacker, forged), isEmpty);
+      expect(await _receive(receiver, sender, genuine), equals({defaultMessageIdFn(genuine)}));
+    });
+
+    test('forwarding the genuine message after a forged one is not penalised', () async {
+      final genuine = await _signedMessage(sender, topic, [1, 2, 3]);
+      final forged = pb.Message()
+        ..mergeFromMessage(genuine)
+        ..data = [6, 6, 6];
+      await _receive(receiver, attacker, forged);
+      await _receive(receiver, sender, genuine);
+      // A third peer forwards the genuine message: a duplicate, no penalty.
+      final forwarder = await node();
+      expect(await _receive(receiver, forwarder, genuine), isEmpty);
+      expect(_invalid(receiver, forwarder.id), 0);
+    });
+  });
+
+  group('Signature policies, as go-libp2p-pubsub', () {
+    /// A content-based ID, as networks without authors use.
+    String contentId(pb.Message m) => String.fromCharCodes(m.data);
+
+    pb.Message unsigned(List<int> data, {List<int>? from}) {
+      final m = pb.Message()
+        ..topic = topic
+        ..data = data;
+      if (from != null) {
+        m
+          ..from = from
+          ..seqno = [1, 2, 3, 4, 5, 6, 7, 8];
+      }
+      return m;
+    }
+
+    test('strictNoSign + noAuthor: messages have no author or signature, and are accepted', () async {
+      final a = await node(signaturePolicy: MessageSignaturePolicy.strictNoSign, noAuthor: true, messageIdFn: contentId);
+      final b = await node(signaturePolicy: MessageSignaturePolicy.strictNoSign, noAuthor: true, messageIdFn: contentId);
+      final received = <PubSubMessage>[];
+      b.pubsub.subscribe(topic).stream.listen((m) => received.add(m as PubSubMessage));
+
+      final msg = unsigned([1, 2, 3]);
+      expect(await _receive(b, a, msg), {contentId(msg)});
+      await Future.delayed(const Duration(milliseconds: 20));
+      expect(received.single.data, [1, 2, 3]);
+    });
+
+    test('strictNoSign rejects a signed message and one with author data', () async {
+      final b = await node(signaturePolicy: MessageSignaturePolicy.strictNoSign, noAuthor: true, messageIdFn: contentId);
+      final a = await node();
+      expect(await _receive(b, a, await _signedMessage(a, topic, [1])), isEmpty);
+      expect(await _receive(b, a, unsigned([2], from: a.id.toBytes())), isEmpty);
+    });
+
+    test('strictSign rejects an unsigned message', () async {
+      final b = await node();
+      final a = await node();
+      expect(await _receive(b, a, unsigned([1], from: a.id.toBytes())), isEmpty);
+      expect(_invalid(b, a.id), 1);
+    });
+
+    test('laxSign accepts an unsigned message but checks a signature that is present', () async {
+      final b = await node(signaturePolicy: MessageSignaturePolicy.laxSign);
+      final a = await node();
+      expect(await _receive(b, a, unsigned([1], from: a.id.toBytes())), hasLength(1));
+      final forged = await _signedMessage(a, topic, [2]);
+      forged.data = [3];
+      expect(await _receive(b, a, forged), isEmpty);
+    });
+
+    test('a message that claims to be ours but comes from a peer is rejected', () async {
+      final b = await node();
+      final a = await node();
+      final fake = await _signedMessage(b, topic, [1]); // Authored by b itself.
+      expect(await _receive(b, a, fake), isEmpty);
+      expect(_invalid(b, a.id), 1);
+    });
+
+    test('noAuthor publish omits from and seqno and does not sign', () async {
+      final a = await node(signaturePolicy: MessageSignaturePolicy.strictNoSign, noAuthor: true, messageIdFn: contentId);
+      final published = <PubSubMessage>[];
+      a.pubsub.subscribe(topic).stream.listen((m) => published.add(m as PubSubMessage));
+      await a.pubsub.publish(topic, Uint8List.fromList([9]));
+      await Future.delayed(const Duration(milliseconds: 20));
+      final m = published.single.rpcMessage;
+      expect(m.from, isEmpty);
+      expect(m.seqno, isEmpty);
+      expect(m.signature, isEmpty);
+    });
+  });
 }
+

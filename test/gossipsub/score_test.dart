@@ -1,359 +1,415 @@
-import 'dart:typed_data';
-
 import 'package:dart_libp2p/core/peer/peer_id.dart';
 import 'package:dart_libp2p_pubsub/src/gossipsub/score.dart';
 import 'package:dart_libp2p_pubsub/src/gossipsub/score_params.dart';
-import 'package:test/test.dart';
 import 'package:fake_async/fake_async.dart';
-import 'package:clock/clock.dart' as clk; // Use an alias to avoid conflict if 'clock' is used elsewhere
+import 'package:test/test.dart';
+
+const topic = 'scored-topic';
+
+final peerA = PeerId.fromString('12D3KooWNVJVohNejPeDRpVTKXDhYd2BuKstxAwDHMMdg22uZaye');
+final peerB = PeerId.fromString('12D3KooWQzSY5S6Tnk2A3LnJnNGeyC4k9PVCzK6a3BGzSzVvG8n3');
+final peerC = PeerId.fromString('12D3KooWLy6yLRMoDpvinNhPkTLmsfd3MiUiALkUt6A2kiMgxyib');
+
+PeerScore scorer(TopicScoreParams topicParams,
+        {double topicScoreCap = 0,
+        double behaviourPenaltyWeight = 0,
+        double behaviourPenaltyThreshold = 0,
+        double ipColocationFactorWeight = 0,
+        int ipColocationFactorThreshold = 1,
+        List<String> whitelist = const [],
+        Map<PeerId, List<String>> ips = const {},
+        double Function(PeerId)? appScore,
+        double appWeight = 0}) =>
+    PeerScore(
+      PeerScoreParams(
+        topics: {topic: topicParams},
+        topicScoreCap: topicScoreCap,
+        appSpecificScore: appScore ?? (_) => 0,
+        appSpecificWeight: appWeight,
+        behaviourPenaltyWeight: behaviourPenaltyWeight,
+        behaviourPenaltyThreshold: behaviourPenaltyThreshold,
+        behaviourPenaltyDecay: 0.9,
+        ipColocationFactorWeight: ipColocationFactorWeight,
+        ipColocationFactorThreshold: ipColocationFactorThreshold,
+        ipColocationFactorWhitelist: whitelist,
+      ),
+      connectionIps: (p) => ips[p] ?? const [],
+    );
 
 void main() {
-  group('PeerScore', () {
-    // No group-level PeerScore instance. Each test will create its own.
-    late PeerScoreParams params;
-    late PeerId peerId; // Can be used by tests to create their PeerScore instances
-
-    setUp(() async { // Make setUp asynchronous
-      params = PeerScoreParams.defaultParams;
-      peerId = await PeerId.random(); // Await the Future
+  group('PeerScore, as go-libp2p-pubsub score_test.go', () {
+    test('an unknown peer scores 0', () {
+      final s = scorer(const TopicScoreParams(topicWeight: 1));
+      expect(s.score(peerA), 0);
     });
 
-    test('initial score is zero', () {
-      final localPeerScore = PeerScore(peerId, params); // Create local instance
-      expect(localPeerScore.score, 0);
-      expect(localPeerScore.topicStats, isEmpty);
-      expect(localPeerScore.knownIPs, isEmpty);
-      expect(localPeerScore.ipColocated, isFalse);
-      expect(localPeerScore.behaviourPenalty, 0);
-      expect(localPeerScore.appSpecificScoreValue, 0);
-      expect(localPeerScore.graylistUntil, isNull);
-    });
+    test('P1: time in mesh, in quanta, capped', () {
+      fakeAsync((async) {
+        final s = scorer(const TopicScoreParams(
+          topicWeight: 0.5,
+          timeInMeshWeight: 1,
+          timeInMeshQuantum: Duration(milliseconds: 1),
+          timeInMeshCap: 3600,
+        ));
+        s.addPeer(peerA);
+        s.graft(peerA, topic);
+        async.elapse(const Duration(milliseconds: 200));
+        s.refreshScores();
+        // 200 quanta * weight 1 * topic weight 0.5.
+        expect(s.score(peerA), closeTo(100, 1));
 
-    test('recordGraft and recordPrune update mesh status and graftTime', () {
-      final localPeerScore = PeerScore(peerId, params);
-      const topic = 'test_topic';
-      localPeerScore.recordGraft(topic);
-      expect(localPeerScore.topicStats[topic]?.inMesh, isTrue);
-      expect(localPeerScore.topicStats[topic]?.graftTime, isNotNull);
-      final graftTime = localPeerScore.topicStats[topic]?.graftTime;
-
-      localPeerScore.recordPrune(topic);
-      expect(localPeerScore.topicStats[topic]?.inMesh, isFalse);
-      expect(localPeerScore.topicStats[topic]?.graftTime, isNull);
-      expect(localPeerScore.topicStats[topic]?.meshTime, greaterThan(Duration.zero));
-
-      localPeerScore.recordGraft(topic);
-      expect(localPeerScore.topicStats[topic]?.inMesh, isTrue);
-      expect(localPeerScore.topicStats[topic]?.graftTime, isNot(equals(graftTime)));
-    });
-
-    test('recordFirstMessageDelivery updates counters and lastSuccessfulDelivery', () {
-      final localPeerScore = PeerScore(peerId, params);
-      const topic = 'test_topic';
-      localPeerScore.recordFirstMessageDelivery(topic);
-      expect(localPeerScore.topicStats[topic]?.firstMessageDeliveries, 1);
-      expect(localPeerScore.topicStats[topic]?.lastSuccessfulDelivery, isNotNull);
-      final firstDeliveryTime = localPeerScore.topicStats[topic]?.lastSuccessfulDelivery;
-
-      localPeerScore.recordFirstMessageDelivery(topic);
-      expect(localPeerScore.topicStats[topic]?.firstMessageDeliveries, 2);
-      expect(localPeerScore.topicStats[topic]?.lastSuccessfulDelivery, isNot(equals(firstDeliveryTime)));
-    });
-
-    test('recordMeshMessageDelivery updates counters and activates mesh deliveries', () {
-      final localPeerScore = PeerScore(peerId, params);
-      const topic = 'test_topic';
-      localPeerScore.recordGraft(topic);
-      localPeerScore.recordMeshMessageDelivery(topic);
-
-      expect(localPeerScore.topicStats[topic]?.meshMessageDeliveries, 1);
-      expect(localPeerScore.topicStats[topic]?.meshMessageDeliveriesActive, isTrue);
-      expect(localPeerScore.topicStats[topic]?.meshMessageDeliveriesActivation, isNotNull);
-      expect(localPeerScore.topicStats[topic]?.lastSuccessfulDelivery, isNotNull);
-      final firstDeliveryTime = localPeerScore.topicStats[topic]?.lastSuccessfulDelivery;
-
-      localPeerScore.recordMeshMessageDelivery(topic);
-      expect(localPeerScore.topicStats[topic]?.meshMessageDeliveries, 2);
-      expect(localPeerScore.topicStats[topic]?.lastSuccessfulDelivery, isNot(equals(firstDeliveryTime)));
-
-      localPeerScore.recordPrune(topic);
-      localPeerScore.recordMeshMessageDelivery(topic);
-      expect(localPeerScore.topicStats[topic]?.meshMessageDeliveries, 2); 
-    });
-
-    test('recordInvalidMessage increments topic and global counters', () {
-      final localPeerScore = PeerScore(peerId, params);
-      const topic = 'test_topic';
-      localPeerScore.recordInvalidMessage(topic);
-      expect(localPeerScore.topicStats[topic]?.invalidMessageDeliveries, 1);
-      expect(localPeerScore.invalidMessageDeliveries, 1);
-
-      localPeerScore.recordInvalidMessage(topic);
-      expect(localPeerScore.topicStats[topic]?.invalidMessageDeliveries, 2);
-      expect(localPeerScore.invalidMessageDeliveries, 2);
-    });
-
-    test('recordMeshMessageFailure increments penalty counter', () {
-      final localPeerScore = PeerScore(peerId, params);
-      const topic = 'test_topic';
-      localPeerScore.recordGraft(topic);
-      localPeerScore.recordMeshMessageFailure(topic);
-      expect(localPeerScore.topicStats[topic]?.meshFailurePenalty, 1);
-
-      localPeerScore.recordMeshMessageFailure(topic);
-      expect(localPeerScore.topicStats[topic]?.meshFailurePenalty, 2);
-
-      localPeerScore.recordPrune(topic);
-      localPeerScore.recordMeshMessageFailure(topic);
-      expect(localPeerScore.topicStats[topic]?.meshFailurePenalty, 2);
-    });
-
-    test('addPenalty and resetPenalty manage behavioral penalty', () {
-      final localPeerScore = PeerScore(peerId, params);
-      localPeerScore.addPenalty(5);
-      expect(localPeerScore.behaviourPenalty, 5);
-      localPeerScore.addPenalty(10);
-      expect(localPeerScore.behaviourPenalty, 15);
-      localPeerScore.resetPenalty();
-      expect(localPeerScore.behaviourPenalty, 0);
-    });
-
-    test('score decays over time', () async {
-      // This test uses fakeAsync, so it creates its own PeerId and passes the clock.
-      final localTestPeerId = await PeerId.random();
-      fakeAsync((fa) { // Changed 'async' to 'fa' for clarity
-        final testParams = PeerScoreParams(
-          appSpecificScore: (_) => 100.0,
-          scoreDecay: 0.9, 
-          decayInterval: Duration(seconds: 1),
-          decayToZero: 0.01,
-        );
-        final localPeerScore = PeerScore(localTestPeerId, testParams, clock: clk.clock); 
-        
-        localPeerScore.refreshScore(); 
-        expect(localPeerScore.score, closeTo(100.0, 0.001));
-
-        fa.elapse(Duration(seconds: 1));
-        localPeerScore.refreshScore(); 
-        expect(localPeerScore.score, closeTo(190.0, 0.001));
-
-        fa.elapse(Duration(seconds: 1));
-        localPeerScore.refreshScore(); 
-        expect(localPeerScore.score, closeTo(271.0, 0.001));
-        
-        localPeerScore.score = 0.05; 
-        fa.elapse(Duration(seconds: 1)); 
-        localPeerScore.refreshScore(); 
-        expect(localPeerScore.score, closeTo(100.045, 0.0001));
-        
-        localPeerScore.score = 0.005; 
-        fa.elapse(Duration(seconds: 1)); 
-        localPeerScore.refreshScore(); 
-        expect(localPeerScore.score, closeTo(100.0, 0.0001));
+        async.elapse(const Duration(seconds: 10));
+        s.refreshScores();
+        expect(s.score(peerA), 3600 * 0.5); // Capped.
       });
     });
 
-    test('peer is graylisted when score drops below threshold', () async {
-      final localTestPeerId = await PeerId.random();
-      fakeAsync((fa) {
-        final graylistParams = PeerScoreParams(
-          graylistThreshold: -50.0,
-          graylistDuration: Duration(minutes: 1),
-          decayInterval: Duration(seconds: 1), 
-        );
-        // Pass the fake clock to PeerScore
-        final localPeerScore = PeerScore(localTestPeerId, graylistParams, clock: clk.clock);
-
-        expect(localPeerScore.graylistUntil, isNull);
-
-        localPeerScore.score = -60.0;
-        localPeerScore.refreshScore(); 
-        
-        expect(localPeerScore.graylistUntil, isNotNull);
-        final graylistEndTime = localPeerScore.graylistUntil!;
-        final expectedEndTime = localPeerScore.lastUpdated.add(graylistParams.graylistDuration);
-        expect(graylistEndTime.millisecondsSinceEpoch, expectedEndTime.millisecondsSinceEpoch);
-
-        localPeerScore.score = -40.0;
-        fa.elapse(Duration(seconds:1)); 
-        localPeerScore.refreshScore();
-        expect(localPeerScore.graylistUntil, isNull);
-      });
-    });
-    
-    test('IP colocation factor applies penalty', () async { 
-      final testPeerId = await PeerId.random(); 
-
-      fakeAsync((fa) { // Changed 'async' to 'fa'
-        final colocParams = PeerScoreParams(
-          ipColocationFactor: 0.5, 
-          ipColocationFactorThreshold: 1, 
-          decayInterval: Duration(seconds: 1),
-          defaultTopicParams: TopicScoreParams(
-            topicWeight: 10, 
-            timeInMeshQuantum: Duration(seconds: 1),
-            timeInMeshCap: 100,
-            topicWeightCapGracePeriod: Duration(days: 365), 
-          )
-        );
-        
-        const topic = 'coloc_topic';
-
-        PeerScore currentPeerScore = PeerScore(testPeerId, colocParams, clock: clk.clock);
-        currentPeerScore.recordGraft(topic);
-        fa.elapse(Duration(seconds: 1)); 
-        currentPeerScore.refreshScore(); 
-        expect(currentPeerScore.score, closeTo(10.0, 0.001), reason: "Score without colocation should be 10.0");
-
-        currentPeerScore = PeerScore(testPeerId, colocParams, clock: clk.clock); 
-        currentPeerScore.recordGraft(topic);
-        currentPeerScore.setIPColocated(true); 
-        fa.elapse(Duration(seconds: 1)); 
-        currentPeerScore.refreshScore(); 
-        expect(currentPeerScore.score, closeTo(5.0, 0.001), reason: "Score with colocation should be 5.0");
-        
-        final negativeScoreTestParams = PeerScoreParams(
-          ipColocationFactor: 0.5,
-          ipColocationFactorThreshold: 1,
-          decayInterval: Duration(seconds: 1),
-          defaultTopicParams: TopicScoreParams(
-            topicWeight: 10, 
-            timeInMeshQuantum: Duration(seconds: 1),
-            timeInMeshCap: 100,
-            meshFailurePenaltyWeight: -30, 
-            topicWeightCapGracePeriod: Duration(days: 365),
-          )
-        );
-        currentPeerScore = PeerScore(testPeerId, negativeScoreTestParams, clock: clk.clock);
-        currentPeerScore.recordGraft(topic);
-        currentPeerScore.recordMeshMessageFailure(topic); 
-        currentPeerScore.setIPColocated(true);
-        fa.elapse(Duration(seconds: 1)); 
-        
-        currentPeerScore.refreshScore(); 
-        expect(currentPeerScore.score, closeTo(-20.0, 0.001), reason: "Score with negative topic sum and colocation should be -20.0");
-      });
+    test('P2: first message deliveries, capped, decaying', () {
+      final s = scorer(const TopicScoreParams(
+        topicWeight: 1,
+        firstMessageDeliveriesWeight: 1,
+        firstMessageDeliveriesDecay: 0.5,
+        firstMessageDeliveriesCap: 3,
+      ));
+      s.addPeer(peerA);
+      for (var i = 0; i < 5; i++) {
+        s.validateMessage('m$i');
+        s.deliverMessage('m$i', peerA, topic);
+      }
+      expect(s.score(peerA), 3); // Capped.
+      s.refreshScores();
+      expect(s.score(peerA), 1.5);
     });
 
-    // TODO: Add tests for P1 cap grace period
-    // TODO: Add tests for P2 (mesh message deliveries) activation window and decay
-    group('P3b invalid message deliveries', () {
-      test('default weight and decay are set and negative', () {
-        final t = PeerScoreParams.defaultParams.defaultTopicParams;
-        expect(t.invalidMessageDeliveriesWeight, defaultInvalidMessageDeliveriesWeight);
-        expect(t.invalidMessageDeliveriesWeight, lessThan(0));
-        expect(t.invalidMessageDeliveriesDecay, defaultInvalidMessageDeliveriesDecay);
-        expect(t.invalidMessageDeliveriesDecay, inExclusiveRange(0, 1));
-      });
-
-      test('penalty is weight * counter^2 and applies at once', () {
-        final localPeerScore = PeerScore(peerId, params);
-        localPeerScore.recordInvalidMessage('t');
-        expect(localPeerScore.score, closeTo(-1.0, 1e-9));
-        localPeerScore.recordInvalidMessage('t');
-        expect(localPeerScore.score, closeTo(-4.0, 1e-9));
-      });
-
-      test('counter decays each decay interval and is zeroed below decayToZero', () async {
-        final localTestPeerId = await PeerId.random();
-        fakeAsync((fa) {
-          final testParams = PeerScoreParams(
-            defaultTopicParams: const TopicScoreParams(
-              invalidMessageDeliveriesWeight: -2.0,
-              invalidMessageDeliveriesDecay: 0.5,
-            ),
-            scoreDecay: 0.9,
-            decayInterval: const Duration(seconds: 1),
-            decayToZero: 0.1,
-          );
-          final s = PeerScore(localTestPeerId, testParams, clock: clk.clock);
-          const topic = 'decay-topic';
-          s.recordInvalidMessage(topic);
-          s.recordInvalidMessage(topic);
-          expect(s.topicStats[topic]!.decayedInvalidMessageDeliveries, 2.0);
-          expect(s.score, closeTo(-8.0, 1e-9)); // -2 * 2^2
-
-          // A refresh in the same interval does not decay or accumulate.
-          s.refreshScore();
-          expect(s.score, closeTo(-8.0, 1e-9));
-
-          fa.elapse(const Duration(seconds: 1));
-          s.refreshScore();
-          expect(s.topicStats[topic]!.decayedInvalidMessageDeliveries, closeTo(1.0, 1e-9));
-          expect(s.score, closeTo(-2.0, 1e-9)); // -2 * 1^2, not accumulated
-          // The per-refresh counter is reset; the decayed counter is not.
-          expect(s.topicStats[topic]!.invalidMessageDeliveries, 0);
-
-          fa.elapse(const Duration(seconds: 2));
-          s.refreshScore();
-          expect(s.topicStats[topic]!.decayedInvalidMessageDeliveries, closeTo(0.25, 1e-9));
-          expect(s.score, closeTo(-0.125, 1e-9));
-
-          fa.elapse(const Duration(seconds: 2)); // 0.0625 < decayToZero
-          s.refreshScore();
-          expect(s.topicStats[topic]!.decayedInvalidMessageDeliveries, 0);
-          expect(s.score, 0);
-        });
-      });
-
-      test('weight 0 turns the penalty off', () {
-        final s = PeerScore(peerId, PeerScoreParams(
-            defaultTopicParams: const TopicScoreParams(invalidMessageDeliveriesWeight: 0)));
-        s.recordInvalidMessage('t');
-        s.refreshScore();
-        expect(s.score, 0);
-      });
-
-      test('penalty respects scoreMin', () {
-        final s = PeerScore(peerId, PeerScoreParams(scoreMin: -10));
-        for (var i = 0; i < 5; i++) {
-          s.recordInvalidMessage('t'); // -25 without the floor
+    test('P3: mesh delivery deficit squared, once active', () {
+      fakeAsync((async) {
+        final s = scorer(const TopicScoreParams(
+          topicWeight: 1,
+          meshMessageDeliveriesWeight: -1,
+          meshMessageDeliveriesDecay: 0.99,
+          meshMessageDeliveriesCap: 100,
+          meshMessageDeliveriesThreshold: 20,
+          meshMessageDeliveriesWindow: Duration(milliseconds: 10),
+          meshMessageDeliveriesActivation: Duration(seconds: 1),
+        ));
+        for (final p in [peerA, peerB, peerC]) {
+          s.addPeer(p);
+          s.graft(p, topic);
         }
-        expect(s.score, -10);
-        s.refreshScore();
-        expect(s.score, -10);
+        // Not active yet: no penalty.
+        s.refreshScores();
+        expect(s.score(peerA), 0);
+
+        // A delivers first; B forwards within the window; C late.
+        for (var i = 0; i < 10; i++) {
+          final id = 'm$i';
+          s.validateMessage(id);
+          s.deliverMessage(id, peerA, topic);
+          s.duplicateMessage(id, peerB, topic);
+        }
+        async.elapse(const Duration(milliseconds: 20));
+        for (var i = 0; i < 10; i++) {
+          s.duplicateMessage('m$i', peerC, topic);
+        }
+        async.elapse(const Duration(seconds: 1));
+        s.refreshScores();
+
+        // A and B: 10 deliveries (decayed once to 9.9), deficit 10.1.
+        expect(s.score(peerA), closeTo(-10.1 * 10.1, 1e-9));
+        expect(s.score(peerB), closeTo(-10.1 * 10.1, 1e-9));
+        // C: no timely delivery, deficit 20.
+        expect(s.score(peerC), -400);
       });
     });
 
-    // TODO: Add tests for P3a (first message deliveries) decay
-    // TODO: Add tests for P6 (behavioural penalty) decay and cap
-    // TODO: Add tests for scoreMin/scoreMax caps
-    // TODO: Test TopicScoreParams overrides
-  });
+    test('P3b: a pruned peer with a deficit keeps a sticky penalty', () {
+      fakeAsync((async) {
+        // As Go's TestScoreMeshFailurePenalty, P3 has weight 0 so that P3b
+        // shows alone.
+        final s = scorer(const TopicScoreParams(
+          topicWeight: 1,
+          meshMessageDeliveriesWeight: 0,
+          meshMessageDeliveriesDecay: 0.5,
+          meshMessageDeliveriesCap: 10,
+          meshMessageDeliveriesThreshold: 3,
+          meshMessageDeliveriesActivation: Duration(seconds: 1),
+          meshFailurePenaltyWeight: -1,
+          meshFailurePenaltyDecay: 0.5,
+        ));
+        s.addPeer(peerA);
+        s.graft(peerA, topic);
+        async.elapse(const Duration(seconds: 2));
+        s.refreshScores();
+        expect(s.score(peerA), 0);
+        s.prune(peerA, topic);
+        expect(s.score(peerA), -9); // Deficit 3, squared: sticky.
+        s.refreshScores();
+        expect(s.score(peerA), -4.5); // Decays.
+      });
+    });
 
-  group('TopicScoreStats', () {
-    test('resetCounters resets relevant fields', () {
-      final stats = TopicScoreStats();
-      stats.firstMessageDeliveries = 5;
-      stats.meshMessageDeliveries = 10;
-      stats.meshMessageDeliveriesActive = true; // This is not reset by resetCounters
-      stats.meshFailurePenalty = 2;
-      stats.invalidMessageDeliveries = 1;
-      stats.inMesh = true; // Not reset
-      stats.graftTime = DateTime.now(); // Not reset
-      stats.meshTime = Duration(seconds: 10); // Not reset
+    test('P4: invalid messages squared, and copies of an invalid message', () {
+      final s = scorer(const TopicScoreParams(
+        topicWeight: 1,
+        invalidMessageDeliveriesWeight: -1,
+        invalidMessageDeliveriesDecay: 0.5,
+      ));
+      s.addPeer(peerA);
+      s.addPeer(peerB);
+      s.addPeer(peerC);
 
-      stats.resetCounters();
+      // B forwards the message while it is in validation; C after.
+      s.validateMessage('bad');
+      s.duplicateMessage('bad', peerB, topic);
+      s.rejectMessage('bad', peerA, topic, RejectReason.validationFailed);
+      s.duplicateMessage('bad', peerC, topic);
+      for (final p in [peerA, peerB, peerC]) {
+        expect(s.score(p), -1, reason: '$p');
+      }
 
-      expect(stats.firstMessageDeliveries, 0);
-      expect(stats.meshMessageDeliveries, 0);
-      expect(stats.meshMessageDeliveriesActive, isTrue); // Remains true
-      expect(stats.meshFailurePenalty, 0);
-      expect(stats.invalidMessageDeliveries, 0);
-      expect(stats.inMesh, isTrue);
-      expect(stats.graftTime, isNotNull);
-      expect(stats.meshTime, Duration(seconds: 10));
+      s.validateMessage('bad2');
+      s.rejectMessage('bad2', peerA, topic, RejectReason.validationFailed);
+      expect(s.score(peerA), -4);
+      s.refreshScores();
+      expect(s.score(peerA), -1);
+    });
+
+    test('ignored and throttled messages are not penalised, nor their copies', () {
+      final s = scorer(const TopicScoreParams(
+        topicWeight: 1,
+        invalidMessageDeliveriesWeight: -1,
+        invalidMessageDeliveriesDecay: 0.5,
+      ));
+      s.addPeer(peerA);
+      s.addPeer(peerB);
+      for (final reason in [RejectReason.validationIgnored, RejectReason.validationThrottled]) {
+        final id = 'msg-$reason';
+        s.validateMessage(id);
+        s.rejectMessage(id, peerA, topic, reason);
+        s.duplicateMessage(id, peerB, topic);
+      }
+      expect(s.score(peerA), 0);
+      expect(s.score(peerB), 0);
+    });
+
+    test('a bad signature penalises the sender only and is not tracked', () {
+      final s = scorer(const TopicScoreParams(
+        topicWeight: 1,
+        invalidMessageDeliveriesWeight: -1,
+        invalidMessageDeliveriesDecay: 0.5,
+      ));
+      s.addPeer(peerA);
+      s.addPeer(peerB);
+      s.rejectMessage('forged', peerA, topic, RejectReason.invalidSignature);
+      // The genuine message with the same ID is valid.
+      s.validateMessage('forged');
+      s.deliverMessage('forged', peerB, topic);
+      s.duplicateMessage('forged', peerB, topic);
+      expect(s.score(peerA), -1);
+      expect(s.score(peerB), 0);
+    });
+
+    test('topics not in params are not scored', () {
+      final s = scorer(const TopicScoreParams(
+        topicWeight: 1,
+        invalidMessageDeliveriesWeight: -1,
+        invalidMessageDeliveriesDecay: 0.5,
+      ));
+      s.addPeer(peerA);
+      s.rejectMessage('x', peerA, 'other-topic', RejectReason.invalidSignature);
+      expect(s.score(peerA), 0);
+    });
+
+    test('topic score cap applies to the topic part only', () {
+      final s = scorer(
+        const TopicScoreParams(
+          topicWeight: 1,
+          firstMessageDeliveriesWeight: 10,
+          firstMessageDeliveriesDecay: 0.5,
+          firstMessageDeliveriesCap: 100,
+        ),
+        topicScoreCap: 15,
+        appScore: (_) => 1,
+        appWeight: 2,
+      );
+      s.addPeer(peerA);
+      for (var i = 0; i < 5; i++) {
+        s.deliverMessage('m$i', peerA, topic);
+      }
+      expect(s.score(peerA), 15 + 2);
+    });
+
+    test('P6: IP colocation, squared surplus over the threshold, whitelist', () {
+      final ips = {
+        peerA: ['1.2.3.4'],
+        peerB: ['1.2.3.4'],
+        peerC: ['1.2.3.4'],
+      };
+      final s = scorer(const TopicScoreParams(topicWeight: 1),
+          ipColocationFactorWeight: -1, ipColocationFactorThreshold: 1, ips: ips);
+      for (final p in [peerA, peerB, peerC]) {
+        s.addPeer(p);
+      }
+      // 3 peers, threshold 1: surplus 2, squared.
+      expect(s.score(peerA), -4);
+
+      final w = scorer(const TopicScoreParams(topicWeight: 1),
+          ipColocationFactorWeight: -1,
+          ipColocationFactorThreshold: 1,
+          whitelist: ['1.2.0.0/16'],
+          ips: ips);
+      for (final p in [peerA, peerB, peerC]) {
+        w.addPeer(p);
+      }
+      expect(w.score(peerA), 0);
+    });
+
+    test('P6: an IPv6 peer also counts for its /64', () {
+      final s = scorer(const TopicScoreParams(topicWeight: 1),
+          ipColocationFactorWeight: -1,
+          ipColocationFactorThreshold: 1,
+          ips: {
+            peerA: ['2001:db8::1'],
+            peerB: ['2001:db8::2'],
+          });
+      s.addPeer(peerA);
+      s.addPeer(peerB);
+      expect(s.score(peerA), -1); // 2 peers in 2001:db8::/64.
+    });
+
+    test('P7: behaviour penalty squared above the threshold, decaying', () {
+      final s = scorer(const TopicScoreParams(topicWeight: 1),
+          behaviourPenaltyWeight: -1, behaviourPenaltyThreshold: 1);
+      s.addPeer(peerA);
+      s.addPenalty(peerA, 1);
+      expect(s.score(peerA), 0); // At the threshold.
+      s.addPenalty(peerA, 2);
+      expect(s.score(peerA), -4); // (3 - 1)^2.
+      s.refreshScores();
+      expect(s.score(peerA), closeTo(-(2.7 - 1) * (2.7 - 1), 1e-9));
+    });
+
+    test('a single penalty decays to zero rather than sticking', () {
+      final s = scorer(const TopicScoreParams(topicWeight: 1), behaviourPenaltyWeight: -10);
+      s.addPeer(peerA);
+      s.addPenalty(peerA, 1);
+      expect(s.score(peerA), -10);
+      for (var i = 0; i < 60; i++) {
+        s.refreshScores();
+      }
+      expect(s.score(peerA), 0);
+    });
+
+    test('retainScore: a negative score is kept, a positive one is not', () {
+      fakeAsync((async) {
+        final s = PeerScore(
+          const PeerScoreParams(
+            behaviourPenaltyWeight: -1,
+            behaviourPenaltyDecay: 0.9,
+            appSpecificWeight: 1,
+            retainScore: Duration(minutes: 10),
+          ).copyWithAppScore((p) => p == peerB ? 5 : 0),
+        );
+        s.addPeer(peerA);
+        s.addPeer(peerB);
+        s.addPenalty(peerA, 2);
+
+        s.removePeer(peerA);
+        s.removePeer(peerB);
+        expect(s.snapshot(peerB), isNull); // Positive: deleted.
+        expect(s.score(peerA), -4);
+
+        // Retained scores do not decay; reconnecting keeps them.
+        async.elapse(const Duration(minutes: 5));
+        s.refreshScores();
+        expect(s.score(peerA), -4);
+        s.addPeer(peerA);
+        expect(s.score(peerA), -4);
+
+        s.removePeer(peerA);
+        async.elapse(const Duration(minutes: 11));
+        s.refreshScores();
+        expect(s.snapshot(peerA), isNull);
+      });
+    });
+
+    test('mesh failure penalty is applied when a retained peer leaves the mesh', () {
+      fakeAsync((async) {
+        final s = scorer(const TopicScoreParams(
+          topicWeight: 1,
+          meshMessageDeliveriesWeight: -1,
+          meshMessageDeliveriesDecay: 0.5,
+          meshMessageDeliveriesCap: 10,
+          meshMessageDeliveriesThreshold: 2,
+          meshMessageDeliveriesActivation: Duration(seconds: 1),
+          meshFailurePenaltyWeight: -1,
+          meshFailurePenaltyDecay: 0.5,
+        ));
+        s.addPeer(peerA);
+        s.graft(peerA, topic);
+        async.elapse(const Duration(seconds: 2));
+        s.refreshScores();
+        s.removePeer(peerA);
+        final stats = s.snapshot(peerA)!.topics[topic]!;
+        expect(stats.inMesh, isFalse);
+        expect(stats.meshFailurePenalty, 4);
+      });
     });
   });
 
-  group('ScoreParams', () {
-    test('default params are created successfully', () {
-      final defaultParams = PeerScoreParams.defaultParams;
-      expect(defaultParams, isA<PeerScoreParams>());
-      // Optionally, check some default values if they are critical
-      expect(defaultParams.graylistThreshold, isNotNull);
+  group('score parameter validation, as go-libp2p-pubsub', () {
+    test('valid defaults', () {
+      const PeerScoreParams().validate();
+      const PeerScoreThresholds().validate();
+      const TopicScoreParams(topicWeight: 1).validate();
     });
 
-    // Add more tests for ScoreParams validation and specific parameter settings
+    test('invalid parameters are refused', () {
+      for (final params in [
+        const PeerScoreParams(topicScoreCap: -1),
+        const PeerScoreParams(ipColocationFactorWeight: 1),
+        const PeerScoreParams(ipColocationFactorWeight: -1, ipColocationFactorThreshold: 0),
+        const PeerScoreParams(ipColocationFactorWhitelist: ['not-a-cidr']),
+        const PeerScoreParams(behaviourPenaltyWeight: 1),
+        const PeerScoreParams(behaviourPenaltyWeight: -1, behaviourPenaltyDecay: 1),
+        const PeerScoreParams(decayInterval: Duration(milliseconds: 500)),
+        const PeerScoreParams(decayToZero: 0),
+        const PeerScoreParams(topics: {topic: TopicScoreParams(topicWeight: -1)}),
+        const PeerScoreParams(topics: {topic: TopicScoreParams(timeInMeshWeight: 1)}), // No cap.
+        const PeerScoreParams(topics: {topic: TopicScoreParams(meshMessageDeliveriesWeight: 1)}),
+        const PeerScoreParams(topics: {topic: TopicScoreParams(invalidMessageDeliveriesWeight: 1)}),
+        const PeerScoreParams(topics: {topic: TopicScoreParams(invalidMessageDeliveriesDecay: 1)}),
+      ]) {
+        expect(params.validate, throwsArgumentError);
+      }
+    });
+
+    test('inconsistent thresholds are refused', () {
+      for (final t in [
+        const PeerScoreThresholds(gossipThreshold: 1),
+        const PeerScoreThresholds(gossipThreshold: -10, publishThreshold: -5),
+        const PeerScoreThresholds(publishThreshold: -10, gossipThreshold: -5, graylistThreshold: -5),
+        const PeerScoreThresholds(acceptPXThreshold: -1),
+        const PeerScoreThresholds(opportunisticGraftThreshold: -1),
+      ]) {
+        expect(t.validate, throwsArgumentError);
+      }
+    });
+
+    test('scoreParameterDecay matches Go', () {
+      // ScoreParameterDecay(time.Hour) in Go is 0.01^(1/3600).
+      expect(scoreParameterDecay(const Duration(hours: 1)), closeTo(0.998721, 1e-6));
+    });
   });
+}
+
+extension on PeerScoreParams {
+  PeerScoreParams copyWithAppScore(double Function(PeerId) appScore) => PeerScoreParams(
+        topics: topics,
+        appSpecificScore: appScore,
+        appSpecificWeight: appSpecificWeight,
+        behaviourPenaltyWeight: behaviourPenaltyWeight,
+        behaviourPenaltyDecay: behaviourPenaltyDecay,
+        retainScore: retainScore,
+      );
 }

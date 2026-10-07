@@ -270,7 +270,7 @@ class ControlIHave extends $pb.GeneratedMessage {
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'ControlIHave', package: const $pb.PackageName(_omitMessageNames ? '' : 'pubsub.pb'), createEmptyInstance: create)
     ..aOS(1, _omitFieldNames ? '' : 'topicID', protoName: 'topicID')
-    ..pPS(2, _omitFieldNames ? '' : 'messageIDs', protoName: 'messageIDs')
+    ..p<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'messageIDs', $pb.PbFieldType.PY, protoName: 'messageIDs')
     ..hasRequiredFields = false
   ;
 
@@ -305,7 +305,7 @@ class ControlIHave extends $pb.GeneratedMessage {
   void clearTopicID() => clearField(1);
 
   @$pb.TagNumber(2)
-  $core.List<$core.String> get messageIDs => $_getList(1);
+  $core.List<$core.List<$core.int>> get messageIDs => $_getList(1);
 }
 
 class ControlIWant extends $pb.GeneratedMessage {
@@ -315,7 +315,7 @@ class ControlIWant extends $pb.GeneratedMessage {
   factory ControlIWant.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'ControlIWant', package: const $pb.PackageName(_omitMessageNames ? '' : 'pubsub.pb'), createEmptyInstance: create)
-    ..pPS(1, _omitFieldNames ? '' : 'messageIDs', protoName: 'messageIDs')
+    ..p<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'messageIDs', $pb.PbFieldType.PY, protoName: 'messageIDs')
     ..hasRequiredFields = false
   ;
 
@@ -341,7 +341,7 @@ class ControlIWant extends $pb.GeneratedMessage {
   static ControlIWant? _defaultInstance;
 
   @$pb.TagNumber(1)
-  $core.List<$core.String> get messageIDs => $_getList(0);
+  $core.List<$core.List<$core.int>> get messageIDs => $_getList(0);
 }
 
 class ControlGraft extends $pb.GeneratedMessage {
@@ -449,7 +449,7 @@ class ControlIDontWant extends $pb.GeneratedMessage {
   factory ControlIDontWant.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'ControlIDontWant', package: const $pb.PackageName(_omitMessageNames ? '' : 'pubsub.pb'), createEmptyInstance: create)
-    ..pPS(1, _omitFieldNames ? '' : 'messageIDs', protoName: 'messageIDs')
+    ..p<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'messageIDs', $pb.PbFieldType.PY, protoName: 'messageIDs')
     ..hasRequiredFields = false
   ;
 
@@ -475,7 +475,7 @@ class ControlIDontWant extends $pb.GeneratedMessage {
   static ControlIDontWant? _defaultInstance;
 
   @$pb.TagNumber(1)
-  $core.List<$core.String> get messageIDs => $_getList(0);
+  $core.List<$core.List<$core.int>> get messageIDs => $_getList(0);
 }
 
 class PeerInfo extends $pb.GeneratedMessage {

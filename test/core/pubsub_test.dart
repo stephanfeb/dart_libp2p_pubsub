@@ -314,6 +314,10 @@ class MockRouter implements Router {
   @override
   Future<void> removePeer(PeerId peerId) async {}
   @override
+  AcceptStatus acceptFrom(PeerId peer) => AcceptStatus.all;
+  @override
+  List<String> get protocols => const ['/meshsub/1.1.0'];
+  @override
   Future<Set<String>> handleRpc(PeerId peerId, dynamic rpc) async => {}; // Typed rpc
   
   @override
@@ -412,37 +416,6 @@ void main() {
 
       await sub2.cancel();
       expect(router.joinedTopics, isEmpty);
-    });
-
-    test('the score of a disconnected peer is kept for retainScore, then deleted', () {
-      fakeAsync((async) {
-        final network = mockHost.network as MockNetwork;
-        final retain = pubsub.scoreParams.retainScore;
-        final peer = PeerId.fromBytes(Uint8List.fromList([0x00, 0x01, 0x01]));
-        network.connectedPeers = [peer];
-        final score = pubsub.getPeerScoreObject(peer);
-        pubsub.refreshScores();
-
-        // Disconnected for almost retainScore, then reconnected: kept.
-        network.connectedPeers = [];
-        pubsub.refreshScores();
-        async.elapse(retain - const Duration(seconds: 1));
-        pubsub.refreshScores();
-        expect(pubsub.peerScores[peer], same(score));
-        network.connectedPeers = [peer];
-        pubsub.refreshScores();
-
-        // Disconnected again: the time starts again.
-        network.connectedPeers = [];
-        pubsub.refreshScores();
-        async.elapse(retain - const Duration(seconds: 1));
-        pubsub.refreshScores();
-        expect(pubsub.peerScores[peer], same(score));
-
-        async.elapse(const Duration(seconds: 1));
-        pubsub.refreshScores();
-        expect(pubsub.peerScores, isNot(contains(peer)));
-      });
     });
 
     // TODO: Add tests for message validation registration and invocation.

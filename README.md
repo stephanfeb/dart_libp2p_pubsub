@@ -1,6 +1,6 @@
 # dart_libp2p_pubsub
 
-A comprehensive libp2p pubsub implementation for Dart, featuring GossipSub v1.1, FloodSub, and RandomSub protocols with message validation, peer scoring, and tracing support.
+A comprehensive libp2p pubsub implementation for Dart, featuring GossipSub v1.2 (with v1.1, v1.0 and FloodSub peers), FloodSub, and RandomSub protocols with message validation, peer scoring, and tracing support.
 
 [![Pub Version](https://img.shields.io/pub/v/dart_libp2p_pubsub)](https://pub.dev/packages/dart_libp2p_pubsub)
 [![Dart CI](https://github.com/stephanfeb/dart_libp2p_pubsub/actions/workflows/dart.yml/badge.svg)](https://github.com/stephanfeb/dart_libp2p_pubsub/actions/workflows/dart.yml)
@@ -9,7 +9,7 @@ A comprehensive libp2p pubsub implementation for Dart, featuring GossipSub v1.1,
 ## Features
 
 🚀 **Multiple PubSub Protocols**
-- **GossipSub v1.1** - Production-ready, efficient pubsub protocol with mesh-based routing
+- **GossipSub v1.2** - Mesh-based routing with peer scoring, IHAVE/IWANT gossip and IDONTWANT, interoperable with go-libp2p-pubsub
 - **FloodSub** - Simple flooding protocol for development and testing
 - **RandomSub** - Randomized message propagation for research
 
@@ -36,8 +36,8 @@ Add to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  dart_libp2p_pubsub: ^1.4.2
-  dart_libp2p: ^0.5.2
+  dart_libp2p_pubsub: ^1.6.0
+  dart_libp2p: ">=1.0.0 <5.0.0"
 ```
 
 ### Basic Usage
@@ -102,30 +102,33 @@ Duplicates are dropped before validation, so a validator runs once per message. 
 
 ### Peer Scoring
 
-Peer scoring is on by default. A peer that delivers a message that validation rejects gets a penalty of `invalidMessageDeliveriesWeight * counter^2` on the topic (default weight `-1.0`; the counter decays to zero in about 1 hour). Tune it for your application:
+Peer scoring follows go-libp2p-pubsub and is off by default. Give the router score parameters and thresholds to turn it on:
 
 ```dart
-final scoreParams = PeerScoreParams(
-  defaultTopicParams: TopicScoreParams(
-    invalidMessageDeliveriesWeight: -10.0,
-    invalidMessageDeliveriesDecay: 0.9987, // per 1 s decayInterval
-  ),
+final router = GossipSubRouter(
+  scoreParams: PeerScoreParams(topics: {
+    'chat': TopicScoreParams(
+      topicWeight: 1,
+      invalidMessageDeliveriesWeight: -10,
+      invalidMessageDeliveriesDecay: scoreParameterDecay(const Duration(hours: 1)),
+    ),
+  }),
+  scoreThresholds: const PeerScoreThresholds(
+      gossipThreshold: -10, publishThreshold: -50, graylistThreshold: -80),
 );
-
-final pubsub = PubSub(host, router, scoreParams: scoreParams);
 ```
 
-See [Configuration](doc/5_configuration.md#invalid-message-penalty-p3b).
+See [Configuration](doc/5_configuration.md#peer-scoring).
 
 ## Documentation
 
 📚 **Comprehensive Guides**
-- [Network Setup](docs/1_network_setup.md) - Getting your libp2p network running
-- [GossipSub Usage](docs/2_gossipsub_usage.md) - How to use GossipSub effectively
-- [GossipSub Deep Dive](docs/3_gossipsub_deep_dive.md) - Advanced GossipSub concepts
-- [Testing](docs/4_testing.md) - Testing strategies and examples
-- [Configuration](docs/5_configuration.md) - Tuning parameters for your use case
-- [Best Practices](docs/6_best_practices.md) - Production deployment guidelines
+- [Network Setup](doc/1_network_setup.md) - Getting your libp2p network running
+- [GossipSub Usage](doc/2_gossipsub_usage.md) - How to use GossipSub effectively
+- [GossipSub Deep Dive](doc/3_gossipsub_deep_dive.md) - Advanced GossipSub concepts
+- [Testing](doc/4_testing.md) - Testing strategies and examples
+- [Configuration](doc/5_configuration.md) - Tuning parameters for your use case
+- [Best Practices](doc/6_best_practices.md) - Production deployment guidelines
 
 ## Architecture
 
@@ -150,7 +153,7 @@ lib/
 
 ## Contributing
 
-We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
+We welcome contributions: open an issue or a pull request.
 
 ### Development Setup
 

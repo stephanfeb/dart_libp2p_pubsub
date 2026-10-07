@@ -2,169 +2,118 @@ import 'dart:async';
 import 'dart:collection';
 
 import 'package:dart_libp2p/core/peer/peer_id.dart';
-import 'package:dart_libp2p/p2p/protocol/identify/identify_exceptions.dart';
 import '../pb/rpc.pb.dart' as pb;
-import '../core/comm.dart'; // For PubSubProtocol and gossipSubIDv11 (or other protocol IDs)
+import '../core/comm.dart';
 import 'package:logging/logging.dart';
 
 final _log = Logger('RpcQueue');
 
-// TODO: Define configuration parameters for the RPC queue, e.g., max queue size, send concurrency.
+/// The default maximum number of RPCs queued for one peer
+/// (go-libp2p-pubsub's `peerOutboundQueueSize`).
+const int defaultPeerOutboundQueueSize = 32;
 
-/// Manages a queue of outgoing RPC messages for a specific peer.
-///
-/// This helps in scenarios where a peer might be slow to process messages or if
-/// we want to control the rate of sending RPCs to a peer.
+/// The outgoing RPCs of one peer, as go-libp2p-pubsub's `rpcQueue`: a
+/// bounded queue with a priority lane, sent one at a time.
 class PeerRpcQueue {
   final PeerId peerId;
-  final PubSubProtocol comms; // To send the actual RPCs
-  final String protocolId; // The protocol ID to use for sending (e.g., gossipSubIDv11)
+  final PubSubProtocol comms;
+  final String protocolId;
 
-  final Queue<pb.RPC> _queue = Queue<pb.RPC>();
+  /// The maximum number of queued RPCs, both lanes together.
+  final int maxSize;
+
+  final Queue<pb.RPC> _normal = Queue<pb.RPC>();
+  final Queue<pb.RPC> _priority = Queue<pb.RPC>();
   bool _isSending = false;
-  // TODO: Add rate limiting, backpressure, max queue size logic.
 
-  PeerRpcQueue(this.peerId, this.comms, this.protocolId);
+  PeerRpcQueue(this.peerId, this.comms, this.protocolId, {this.maxSize = defaultPeerOutboundQueueSize});
 
-  /// Adds an RPC message to the queue for sending.
-  void add(pb.RPC rpc) {
-    // TODO: Check against max queue size.
-    _log.finest('PeerRpcQueue ($peerId): add() called with ${rpc.toShortString()}. Queue length before: ${_queue.length}, _isSending: $_isSending');
-    _queue.addLast(rpc);
-    _log.finest('PeerRpcQueue ($peerId): add() after addLast. Queue length: ${_queue.length}');
-    
-    // Fire-and-forget with explicit error containment
-    // Use runZoned to create an error-isolating zone that prevents errors from escaping
-    runZoned(() {
-      // Use Future.microtask to properly handle async errors
-      Future.microtask(() async {
-        try {
-          await _trySend();
-        } catch (e, s) {
-          // This should never happen due to _trySend's internal try-catch,
-          // but provides an extra safety net to prevent zone errors
-          _log.warning('PeerRpcQueue ($peerId): Unexpected error in add() microtask: $e');
-          _log.finest('Stack: $s');
-        }
-      }).catchError((e, s) {
-        // Final safety net: catch any errors that somehow escape the try-catch above
-        // This prevents unhandled errors from crashing the application
-        _log.warning('PeerRpcQueue ($peerId): Error escaped to Future.catchError: $e');
-        _log.finest('Stack: $s');
-      }, test: (e) => true); // Catch all error types
-    }, onError: (e, s) {
-      // Zone-level error handler - last line of defense
-      // This catches any errors that escape all other handlers
-      _log.warning('PeerRpcQueue ($peerId): Error caught by zone error handler: $e');
-      _log.finest('Stack: $s');
-    });
+  /// Queues [rpc]; [urgent] RPCs are sent before the others. Returns false,
+  /// without queueing, when the queue is full.
+  bool add(pb.RPC rpc, {bool urgent = false}) {
+    if (length >= maxSize) {
+      _log.fine('PeerRpcQueue ($peerId): queue full ($maxSize); dropping ${rpc.toShortString()}.');
+      return false;
+    }
+    (urgent ? _priority : _normal).addLast(rpc);
+    if (!_isSending) {
+      // The send loop catches its errors, so nothing escapes this future.
+      unawaited(_sendLoop());
+    }
+    return true;
   }
 
-  Future<void> _trySend() async {
+  Future<void> _sendLoop() async {
+    _isSending = true;
     try {
-      _log.finest('PeerRpcQueue ($peerId): _trySend() called. _isSending: $_isSending, queue empty: ${_queue.isEmpty}');
-      if (_isSending || _queue.isEmpty) {
-        if(_isSending) _log.finest('PeerRpcQueue ($peerId): _trySend() returning because _isSending is true.');
-        if(_queue.isEmpty) _log.finest('PeerRpcQueue ($peerId): _trySend() returning because queue is empty.');
-        return;
-      }
-      _isSending = true;
-      _log.finest('PeerRpcQueue ($peerId): _trySend() set _isSending = true. Starting loop.');
-
-      while (_queue.isNotEmpty) {
-        final rpc = _queue.first; // Peek at the first message
-        _log.finest('PeerRpcQueue ($peerId): Loop iteration. Queue length: ${_queue.length}. Processing ${rpc.toShortString()}');
+      while (length > 0) {
+        final rpc = _priority.isNotEmpty ? _priority.removeFirst() : _normal.removeFirst();
         try {
-          _log.finest('PeerRpcQueue ($peerId): Attempting to send from queue: ${rpc.toShortString()} with protocol $protocolId');
-          // print('PeerRpcQueue ($peerId): Sending RPC: ${rpc.toShortString()}');
           await comms.sendRpc(peerId, rpc, protocolId);
-          _queue.removeFirst(); // Successfully sent, remove from queue
-          _log.finest('PeerRpcQueue ($peerId): Successfully sent ${rpc.toShortString()} and removed from queue. Queue length now: ${_queue.length}');
-        } on IdentifyTimeoutException catch (e) {
-          // Identify timeout is recoverable - peer may have gone offline.
-          // Clear the queue for this peer and stop sending.
-          _log.fine('PeerRpcQueue ($peerId): Identify timeout - peer unreachable. Clearing queue (${_queue.length} messages) and stopping send loop.');
-          _queue.clear();
-          _isSending = false;
-          return;
-        } on IdentifyException catch (e) {
-          // Other identify errors - also stop sending to this peer
-          _log.fine('PeerRpcQueue ($peerId): Identify error: $e. Clearing queue and stopping send loop.');
-          _queue.clear();
-          _isSending = false;
-          return;
-        } catch (e, s) { // Added stack trace to catch
-          _log.finest('PeerRpcQueue ($peerId): CAUGHT ERROR sending RPC: $e. Stack: $s. Message ${rpc.toShortString()} remains in queue. Stopping send loop.');
-          // TODO: Implement retry logic, backoff, or error handling (e.g., drop message, notify router).
-          // For now, we stop sending to this peer on error to avoid hammering.
-          _isSending = false;
-          return;
+        } catch (e) {
+          // The RPC is dropped; the next one tries a new stream. A peer that
+          // cannot be reached at all is removed when it disconnects.
+          _log.fine('PeerRpcQueue ($peerId): dropping ${rpc.toShortString()} after a send error: $e');
         }
-        // TODO: Add delay or rate limiting if needed.
       }
-      _isSending = false;
-      _log.finest('PeerRpcQueue ($peerId): _trySend() loop finished (queue empty). Set _isSending = false.');
-    } catch (e, s) {
-      // Outer catch-all to ensure _trySend never throws unhandled exceptions
-      _log.warning('PeerRpcQueue ($peerId): UNEXPECTED ERROR in _trySend: $e');
-      _log.finest('Stack trace: $s');
+    } finally {
       _isSending = false;
     }
   }
 
   /// Clears the queue for this peer.
   void clear() {
-    _queue.clear();
+    _normal.clear();
+    _priority.clear();
   }
 
-  int get length => _queue.length;
+  int get length => _normal.length + _priority.length;
 }
 
-/// Manages RPC queues for all peers.
-///
-/// This class holds a map of [PeerRpcQueue] instances, one for each peer
-/// we are sending RPCs to.
+/// The outgoing RPC queues of all peers.
 class RpcOutgoingQueueManager {
   final PubSubProtocol _comms;
-  final String _defaultProtocolId; // e.g., gossipSubIDv11
+  final String _defaultProtocolId;
+  final int _maxQueueSize;
   final Map<PeerId, PeerRpcQueue> _peerQueues = {};
 
-  RpcOutgoingQueueManager(this._comms, this._defaultProtocolId);
+  RpcOutgoingQueueManager(this._comms, this._defaultProtocolId,
+      {int maxQueueSize = defaultPeerOutboundQueueSize})
+      : _maxQueueSize = maxQueueSize;
 
-  /// Enqueues an RPC to be sent to a specific peer.
-  ///
-  /// If a queue for the peer doesn't exist, it's created.
-  void sendRpc(PeerId peerId, pb.RPC rpc, {String? protocolId}) {
-    final effectiveProtocolId = protocolId ?? _defaultProtocolId;
-    final queue = _peerQueues.putIfAbsent(
-      peerId,
-      () => PeerRpcQueue(peerId, _comms, effectiveProtocolId),
-    );
-    // Ensure the queue is using the potentially updated protocolId if specified
-    // This simple model assumes protocolId per peer queue is fixed on creation.
-    // If protocolId can change per RPC for the same peer, PeerRpcQueue needs adjustment.
-    if (queue.protocolId != effectiveProtocolId && protocolId != null) {
-       _log.finest('RpcOutgoingQueueManager: Warning - trying to send RPC to $peerId with different protocol ID (${queue.protocolId} vs $effectiveProtocolId). Using existing queue protocol.');
-       // Or, create a new queue for the different protocol, or make PeerRpcQueue handle multiple protocols.
-       // For now, we stick to the queue's initial protocol.
+  /// Queues [rpc] for [peerId], as go-libp2p-pubsub's `sendRPC`. An RPC
+  /// larger than the comms' maximum message size is split into several
+  /// RPCs (see [splitRpc]). Returns each part with whether it was queued: a
+  /// part is dropped if it is still too large (one oversized message) or if
+  /// the queue is full.
+  List<(pb.RPC, bool)> sendRpc(PeerId peerId, pb.RPC rpc, {String? protocolId, bool urgent = false}) {
+    final limit = _comms.maxMessageSize;
+    return [
+      for (final part in splitRpc(rpc, limit)) (part, _enqueue(peerId, part, limit, protocolId, urgent)),
+    ];
+  }
+
+  bool _enqueue(PeerId peerId, pb.RPC part, int limit, String? protocolId, bool urgent) {
+    final size = part.writeToBuffer().length;
+    if (size > limit) {
+      _log.fine('RpcOutgoingQueueManager: Dropping oversized RPC to $peerId ($size bytes, limit $limit).');
+      return false;
     }
-
-    queue.add(rpc);
+    final queue = _peerQueues.putIfAbsent(
+        peerId, () => PeerRpcQueue(peerId, _comms, protocolId ?? _defaultProtocolId, maxSize: _maxQueueSize));
+    return queue.add(part, urgent: urgent);
   }
 
   /// Removes and clears the queue for a peer (e.g., when a peer disconnects).
   void peerDisconnected(PeerId peerId) {
-    final queue = _peerQueues.remove(peerId);
-    queue?.clear();
-    _log.finest('RpcOutgoingQueueManager: Cleared RPC queue for disconnected peer $peerId.');
+    _peerQueues.remove(peerId)?.clear();
   }
 
   /// Clears all RPC queues.
   void clearAll() {
-    _peerQueues.forEach((_, queue) => queue.clear());
+    for (final queue in _peerQueues.values) {
+      queue.clear();
+    }
     _peerQueues.clear();
-    _log.finest('RpcOutgoingQueueManager: All RPC queues cleared.');
   }
-
-  // TODO: Add methods for managing queue parameters, stats, etc.
 }

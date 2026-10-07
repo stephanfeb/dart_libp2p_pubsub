@@ -31,7 +31,12 @@ class _Node {
       connManager: p2p_conn_mgr.ConnectionManager(),
       hostEventBus: p2p_event_bus.BasicBus(),
     );
-    final router = GossipSubRouter();
+    // Scoring with a behaviour penalty, to check that scores are retained.
+    final router = GossipSubRouter(
+      scoreParams: const PeerScoreParams(behaviourPenaltyWeight: -1, behaviourPenaltyDecay: 0.99),
+      scoreThresholds: const PeerScoreThresholds(
+          gossipThreshold: -10, publishThreshold: -50, graylistThreshold: -80),
+    );
     final pubsub = PubSub(node.host, router, privateKey: node.keyPair.privateKey);
     await pubsub.start();
     return _Node(node.host, pubsub, router);
@@ -110,13 +115,16 @@ void main() {
     await _until(() => a.router.mesh[topic]?.contains(b.id) ?? false,
         reason: 'A to GRAFT B');
 
-    final scoreOfB = a.pubsub.getPeerScoreObject(b.id);
+    // B misbehaves, so its score is negative.
+    a.router.score!.addPenalty(b.id, 2);
+    expect(a.router.score!.score(b.id), lessThan(0));
 
     await a.host.network.closePeer(b.id);
 
     await _until(() => !(a.router.mesh[topic]?.contains(b.id) ?? false),
         reason: 'A to remove B from its mesh');
     // The score is kept, so B cannot clear its penalties by reconnecting.
-    expect(a.pubsub.peerScores[b.id], same(scoreOfB));
+    expect(a.router.score!.snapshot(b.id), isNotNull);
+    expect(a.router.score!.score(b.id), lessThan(0));
   }, timeout: const Timeout(Duration(seconds: 60)));
 }

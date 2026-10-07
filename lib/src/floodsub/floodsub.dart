@@ -1,186 +1,166 @@
 import 'dart:async';
-import 'dart:collection'; // For HashSet
+import 'dart:typed_data';
 
 import 'package:dart_libp2p/core/peer/peer_id.dart';
-
-import '../core/pubsub.dart';
-import '../core/message.dart';
-import '../pb/rpc.pb.dart' as pb;
-import '../core/topic.dart';
-import '../core/router.dart';
-import '../core/comm.dart' show floodSubID; // Assuming floodSubID is defined for FloodSub protocol
 import 'package:logging/logging.dart';
+
+import '../core/comm.dart';
+import '../core/message.dart';
+import '../core/pubsub.dart';
+import '../core/router.dart';
+import '../core/topic.dart';
+import '../gossipsub/rpc_queue.dart';
+import '../pb/rpc.pb.dart' as pb;
+import '../util/midgen.dart';
+import '../util/timecache.dart';
 
 final _log = Logger('FloodSubRouter');
 
-/// Implementation of the FloodSub routing protocol.
+/// The FloodSub router, as go-libp2p-pubsub's `FloodSubRouter`: every
+/// message goes to every connected peer subscribed to its topic, except the
+/// peer it came from and its author.
 ///
-/// FloodSub is a simple router that floods messages to all connected peers
-/// that are subscribed to the relevant topics.
+/// Subclasses choose other recipients by overriding [selectPeers].
 class FloodSubRouter implements Router {
   PubSub? _pubsub;
-  
-  /// Set of all known peers that support FloodSub.
-  final Set<PeerId> _peers = HashSet<PeerId>();
-  
-  /// Topics this node is subscribed to.
-  final Set<String> _subscribedTopics = HashSet<String>();
+  RpcOutgoingQueueManager? _queue;
 
-  // FloodSub doesn't have complex parameters like GossipSub.
+  /// How long the ID of a seen message is remembered.
+  final Duration seenMessagesTTL;
+  late final FirstSeenCache<String> _seen = FirstSeenCache<String>(seenMessagesTTL, 1 << 17);
 
-  FloodSubRouter();
+  /// The pubsub protocol of each peer added.
+  final Map<PeerId, String> peerProtocols = {};
+
+  /// The topics each peer is subscribed to.
+  final Map<PeerId, Set<String>> _peerTopics = {};
+
+  FloodSubRouter({this.seenMessagesTTL = const Duration(minutes: 2)});
+
+  @override
+  List<String> get protocols => const [floodSubID];
+
+  PubSub? get pubsub => _pubsub;
 
   @override
   Future<void> attach(PubSub pubsub) async {
     _pubsub = pubsub;
-    // TODO: Register FloodSub protocol ID with PubSub's comms layer.
-    // This would involve calling something like:
-    // _pubsub!.comms.setProtocolHandler(floodSubID, _handleIncomingRpcWrapper);
-    // where _handleIncomingRpcWrapper adapts to call this.handleRpc.
-    _log.fine('FloodSubRouter attached to PubSub.');
+    _queue = RpcOutgoingQueueManager(pubsub.comms, protocols.first);
   }
 
   @override
   Future<void> detach() async {
-    // TODO: Unregister protocol handler.
+    _queue?.clearAll();
     _pubsub = null;
-    _peers.clear();
-    _subscribedTopics.clear();
-    _log.fine('FloodSubRouter detached.');
   }
 
   @override
   Future<void> addPeer(PeerId peerId, String protocolId) async {
-    if (protocolId == floodSubID) {
-      _log.fine('FloodSubRouter: Peer added - ${peerId.toBase58()} supporting $protocolId');
-      _peers.add(peerId);
-      // TODO: FloodSub might involve sending current subscriptions to new peers,
-      // or peers announce their subscriptions upon connection.
-      // For now, we just track the peer.
-    } else {
-      _log.fine('FloodSubRouter: Peer ${peerId.toBase58()} added with non-FloodSub protocol $protocolId. Ignoring for FloodSub.');
-    }
+    peerProtocols[peerId] = protocolId;
   }
 
   @override
   Future<void> removePeer(PeerId peerId) async {
-    if (_peers.remove(peerId)) {
-      _log.fine('FloodSubRouter: Peer removed - ${peerId.toBase58()}');
-    }
+    _pubsub?.removePeer(peerId);
+    peerProtocols.remove(peerId);
+    _peerTopics.remove(peerId);
+    _queue?.peerDisconnected(peerId);
   }
 
   @override
+  AcceptStatus acceptFrom(PeerId peer) => AcceptStatus.all;
+
+  @override
   Future<Set<String>> handleRpc(PeerId peerId, pb.RPC rpc) async {
-    _log.fine('FloodSubRouter: Handling RPC from ${peerId.toBase58()}');
-    
-    // FloodSub primarily processes published messages.
-    // It doesn't have complex control messages like GossipSub's GRAFT/PRUNE.
-    // It might observe SUBSCRIBE/UNSUBSCRIBE messages if they are part of the RPC.
-    if (rpc.subscriptions.isNotEmpty) {
-      for (final subOpt in rpc.subscriptions) {
-        // In a simple FloodSub, other peers' subscriptions might not be explicitly tracked
-        // for routing decisions beyond knowing they are part of the topic.
-        // We typically flood to all peers in the topic.
-        _log.fine('FloodSubRouter: Peer $peerId sent subscription for ${subOpt.topicid} (subscribe: ${subOpt.subscribe}) - noted.');
+    // Subscriptions first, synchronously (see Router.handleRpc).
+    for (final sub in rpc.subscriptions) {
+      if (sub.subscribe) {
+        _peerTopics.putIfAbsent(peerId, () => {}).add(sub.topicid);
+      } else {
+        _peerTopics[peerId]?.remove(sub.topicid);
       }
     }
-
-    if (rpc.publish.isNotEmpty) {
-      for (final msgProto in rpc.publish) {
-        // TODO: Validate the message (size, origin, etc.) - this should use PubSub's validation.
-        // For now, assume valid.
-        
-        // Check if we are subscribed to this message's topic.
-        // Floodsub typically delivers if subscribed.
-        if (_subscribedTopics.contains(msgProto.topic)) {
-          _log.fine('FloodSubRouter: Received message on subscribed topic ${msgProto.topic} from $peerId. Delivering locally.');
-          final pubSubMsg = PubSubMessage(rpcMessage: msgProto, receivedFrom: peerId);
-          _pubsub?.deliverReceivedMessage(pubSubMsg); // Corrected method name
-        } else {
-          _log.fine('FloodSubRouter: Received message on unsubscribed topic ${msgProto.topic} from $peerId. Ignoring for local delivery.');
-        }
-        
-        // Forward (flood) the message to other peers, excluding the sender.
-        // This is a naive flood; a real implementation might have seen-message tracking (like mcache).
-        _log.fine('FloodSubRouter: Flooding message on topic ${msgProto.topic} from $peerId to other peers.');
-        final rpcToSend = pb.RPC()..publish.add(msgProto);
-        for (final otherPeerId in _peers) {
-          if (otherPeerId == peerId) continue; // Don't send back to sender
-
-          // TODO: Check if otherPeerId is interested in the topic (if FloodSub variant supports it).
-          // For basic flood, send to all.
-          try {
-            _pubsub?.comms.sendRpc(otherPeerId, rpcToSend, floodSubID);
-          } catch (e) {
-            _log.fine('FloodSubRouter: Failed to flood message to peer ${otherPeerId.toBase58()}: $e');
-          }
-        }
-      }
+    final pending = <Future<String?>>[];
+    for (final msg in rpc.publish) {
+      final id = _idOf(msg);
+      if (_seen.contains(id)) continue;
+      pending.add(_validateAndForward(peerId, msg, id));
     }
-    // FloodSub delivers messages directly above, so return empty set
-    // to prevent PubSub from double-delivering.
-    return {};
+    return {for (final id in await Future.wait(pending)) if (id != null) id};
+  }
+
+  Future<String?> _validateAndForward(PeerId from, pb.Message msg, String id) async {
+    final pubsub = _pubsub;
+    if (pubsub == null) return null;
+    var duplicate = false;
+    final result = await pubsub.validateMessage(PubSubMessage(rpcMessage: msg, receivedFrom: from),
+        markSeen: () {
+      if (_seen.contains(id)) {
+        duplicate = true;
+        return false;
+      }
+      _seen.add(id);
+      return true;
+    });
+    if (duplicate || result != ValidationResult.accept || _pubsub == null) return null;
+    _seen.add(id);
+    _send(msg, from);
+    return id;
   }
 
   @override
   Future<void> publish(PubSubMessage message) async {
-    final topicId = message.topic;
-    _log.fine('FloodSubRouter: Publishing message for topic $topicId');
+    final pubsub = _pubsub;
+    if (pubsub == null) return;
+    _seen.add(_idOf(message.rpcMessage));
+    _send(message.rpcMessage, message.receivedFrom ?? pubsub.host.id);
+  }
 
-    if (_pubsub == null) {
-      _log.warning('FloodSubRouter: PubSub not attached. Cannot publish.');
-      return;
+  void _send(pb.Message msg, PeerId from) {
+    final author = _authorOf(msg);
+    final candidates = topicPeers(msg.topic).where((p) => p != from && p != author).toList();
+    final rpc = pb.RPC()..publish.add(msg);
+    for (final peerId in selectPeers(msg.topic, candidates)) {
+      _queue?.sendRpc(peerId, rpc);
     }
+  }
 
-    // TODO: Add to a "seen" cache for this router to prevent re-flooding if received back.
-    // For now, this simple version doesn't have its own mcache.
+  /// The recipients of a message on [topic] among [candidates]: all of them.
+  Iterable<PeerId> selectPeers(String topic, List<PeerId> candidates) => candidates;
 
-    final rpcToSend = pb.RPC()..publish.add(message.rpcMessage);
+  /// The connected peers subscribed to [topic].
+  List<PeerId> topicPeers(String topic) {
+    final connected = _pubsub?.host.network.peers.toSet() ?? const <PeerId>{};
+    return [
+      for (final entry in _peerTopics.entries)
+        if (entry.value.contains(topic) && connected.contains(entry.key)) entry.key,
+    ];
+  }
 
-    int floodCount = 0;
-    for (final peerId in _peers) {
-      // Don't send to self if message originated locally (receivedFrom is null)
-      // or if the peer is the original sender of a relayed message.
-      if (message.receivedFrom == peerId) continue; 
-      
-      // In basic FloodSub, we flood to all connected peers.
-      // More advanced versions might check if peer is subscribed to the topic.
-      _log.fine('FloodSubRouter: Flooding message on topic $topicId to peer ${peerId.toBase58()}');
-      try {
-        _pubsub!.comms.sendRpc(peerId, rpcToSend, floodSubID);
-        floodCount++;
-      } catch (e) {
-        _log.fine('FloodSubRouter: Failed to flood message to peer ${peerId.toBase58()}: $e');
-      }
+  String _idOf(pb.Message msg) => (_pubsub?.messageIdFn ?? defaultMessageIdFn)(msg);
+
+  PeerId? _authorOf(pb.Message msg) {
+    if (msg.from.isEmpty) return null;
+    try {
+      return PeerId.fromBytes(Uint8List.fromList(msg.from));
+    } catch (_) {
+      return null;
     }
-    _log.fine('FloodSubRouter: Message for topic $topicId flooded to $floodCount peers.');
   }
 
   @override
-  Future<void> join(Topic topic) async {
-    _log.fine('FloodSubRouter: Joining topic ${topic.name}');
-    _subscribedTopics.add(topic.name);
-    // FloodSub doesn't typically send control messages like GRAFT.
-    // It might announce its new subscriptions to peers if the protocol variant includes that.
-  }
+  Future<void> join(Topic topic) async {}
 
   @override
-  Future<void> leave(Topic topic) async {
-    _log.fine('FloodSubRouter: Leaving topic ${topic.name}');
-    _subscribedTopics.remove(topic.name);
-    // FloodSub doesn't typically send control messages like PRUNE.
-  }
+  Future<void> leave(Topic topic) async {}
 
   @override
   Future<void> start() async {
-    // FloodSub is mostly stateless and event-driven, may not need a start action
-    // beyond what attach() does (like registering protocol handler).
     _log.fine('FloodSubRouter started.');
   }
 
   @override
   Future<void> stop() async {
-    // Similar to start(), may not need specific stop actions beyond detach().
-    _log.fine('FloodSubRouter stopped.');
+    _seen.clear();
   }
 }

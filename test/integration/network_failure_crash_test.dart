@@ -85,8 +85,8 @@ void main() {
           reason: 'No unhandled error should escape from PeerRpcQueue.add()');
       expect(rpcReceivedCount, equals(0), 
           reason: 'No RPC should have been received since peer does not exist');
-      expect(queue.length, greaterThan(0), 
-          reason: 'RPC should remain in queue after send failure');
+      expect(queue.length, equals(0),
+          reason: 'An RPC that fails to send is dropped, not kept forever');
     });
 
     test('Test 2: Stream creation timeout error should not crash', () async {
@@ -359,7 +359,7 @@ void main() {
       
       // Verify queue was cleared (our fix clears the queue on identify timeout)
       expect(queue.length, equals(0),
-          reason: 'Queue should be cleared when IdentifyTimeoutException occurs');
+          reason: 'The RPC that failed with IdentifyTimeoutException is dropped');
     });
 
     test('Test 8: IdentifyStreamException should be caught and queue cleared', () async {
@@ -402,7 +402,7 @@ void main() {
       
       // Verify queue was cleared (our fix clears the queue on identify exceptions)
       expect(queue.length, equals(0),
-          reason: 'Queue should be cleared when IdentifyStreamException occurs');
+          reason: 'The RPC that failed with IdentifyStreamException is dropped');
     });
   });
 }

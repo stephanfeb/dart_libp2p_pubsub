@@ -10,19 +10,17 @@ import 'package:dart_libp2p/p2p/protocol/identify/identify_exceptions.dart';
 import 'package:dart_libp2p/utils/varint.dart';
 
 import '../pb/rpc.pb.dart' as pb;
+import 'validation.dart' show defaultMaxMessageSize;
 import 'package:logging/logging.dart';
 
 final _log = Logger('PubSubComm');
 
-// Protocol IDs
-// Note: go-libp2p-pubsub uses "/meshsub/1.1.0" for GossipSub v1.1
-// and "/floodsub/1.0.0" for FloodSub.
-// Other versions like GossipSub v1.0 ("/meshsub/1.0.0") also exist.
-// We'll primarily focus on GossipSub v1.1.0.
-
+// Protocol IDs, as go-libp2p-pubsub.
+const String gossipSubIDv10 = '/meshsub/1.0.0';
 const String gossipSubIDv11 = '/meshsub/1.1.0';
+const String gossipSubIDv12 = '/meshsub/1.2.0';
 const String floodSubID = '/floodsub/1.0.0';
-// Potentially add more as needed, e.g., gossipSubIDv10 = '/meshsub/1.0.0';
+const String randomSubID = '/randomsub/1.0.0';
 
 /// Represents a persistent outbound stream to a peer.
 class _PersistentStream {
@@ -37,6 +35,19 @@ class _PersistentStream {
   }) : createdAt = DateTime.now();
 
   bool get isClosed => _isClosed || stream.isClosed;
+
+  /// The end of the chain of writes on this stream.
+  Future<void> _lastWrite = Future.value();
+
+  /// Writes [data] after the previous writes on this stream complete. A
+  /// frame is written in several parts by the muxer, so writes must not
+  /// overlap or frames would interleave.
+  Future<void> write(Uint8List data) {
+    final previous = _lastWrite;
+    final done = Completer<void>();
+    _lastWrite = done.future;
+    return previous.then((_) => stream.write(data)).whenComplete(done.complete);
+  }
 
   Future<void> close() async {
     if (!_isClosed) {
@@ -56,7 +67,9 @@ class _PersistentStream {
 class PubSubProtocol {
   final Host _host;
   final Future<void> Function(PeerId peerId, pb.RPC rpc) _onRpcReceived;
-  void Function(PeerId peerId)? onNewInboundPeer;
+  /// Called for each inbound pubsub stream, with the peer and the stream's
+  /// protocol.
+  void Function(PeerId peerId, String protocol)? onNewInboundPeer;
 
   /// Map of persistent outbound streams per peer
   final Map<PeerId, _PersistentStream> _outboundStreams = {};
@@ -64,40 +77,70 @@ class PubSubProtocol {
   /// Lock for managing stream creation per peer
   final Map<PeerId, Completer<_PersistentStream>> _streamCreationLocks = {};
 
+  /// The protocols we speak, in order of preference. Inbound streams are
+  /// accepted on each; outbound streams negotiate one of them.
+  final List<String> protocols;
+
+  /// The protocol negotiated on the outbound stream to each peer.
+  final Map<PeerId, String> _negotiated = {};
+
   bool _isClosing = false;
+
+  /// The maximum size of one RPC, in bytes, in either direction (as
+  /// go-libp2p-pubsub's `WithMaxMessageSize`). A peer that sends a larger
+  /// frame has its stream reset; [sendRpc] refuses to send a larger RPC.
+  final int maxMessageSize;
 
   /// Creates a new [PubSubProtocol] instance.
   ///
   /// [_host] is the libp2p Host.
   /// [_onRpcReceived] is a callback function that will be invoked when a new
   /// RPC message is received from a peer.
-  PubSubProtocol(this._host, this._onRpcReceived) {
-    _host.setStreamHandler(gossipSubIDv11, _handleNewStreamData);
-    // TODO: Register for other supported protocols like floodSubID if needed.
-    _log.fine('PubSubProtocol initialized with persistent streams for $gossipSubIDv11.');
+  PubSubProtocol(this._host, this._onRpcReceived,
+      {this.maxMessageSize = defaultMaxMessageSize, this.protocols = const [gossipSubIDv11]}) {
+    for (final protocol in protocols) {
+      _host.setStreamHandler(protocol, _handleNewStreamData);
+    }
+    _log.fine('PubSubProtocol initialized with persistent streams for $protocols.');
   }
+
+  /// The protocol negotiated with [peerId] on our stream to it, if open.
+  String? protocolOf(PeerId peerId) => _negotiated[peerId];
 
   /// Internal handler for new inbound streams.
   /// Reads multiple varint-length-prefixed RPC messages on a persistent stream.
   Future<void> _handleNewStreamData(P2PStream stream, PeerId remotePeer) async {
     _log.fine('Received incoming PubSub stream ${stream.id()} from $remotePeer on protocol ${stream.protocol()}');
     // Notify about new peer so we can send our subscriptions
-    onNewInboundPeer?.call(remotePeer);
+    onNewInboundPeer?.call(remotePeer, stream.protocol());
     final carryOver = <int>[];
+    var failed = false;
     try {
       while (!stream.isClosed && !_isClosing) {
         final bytes = await _readVarintPrefixed(stream, carryOver);
         if (bytes == null) break; // Stream closed cleanly
         final rpc = pb.RPC.fromBuffer(bytes);
-        await _onRpcReceived(remotePeer, rpc);
+        // As in go-libp2p-pubsub, reading does not wait for the RPC to be
+        // handled: the router handles control messages synchronously and
+        // validates messages concurrently (see Router.handleRpc).
+        _onRpcReceived(remotePeer, rpc).catchError((Object e, StackTrace s) {
+          _log.warning('Error handling RPC from $remotePeer: $e\n$s');
+        });
       }
-    } catch (e, s) {
+    } catch (e) {
+      failed = true;
       if (!_isClosing) {
         _log.fine('Error on inbound PubSub stream from $remotePeer: $e');
       }
     } finally {
       if (!stream.isClosed) {
-        await stream.close();
+        // As in go-libp2p-pubsub, a stream that failed (an oversized or
+        // malformed frame) is reset rather than closed.
+        try {
+          await (failed ? stream.reset() : stream.close());
+        } catch (e) {
+          _log.fine('Error closing inbound PubSub stream from $remotePeer: $e');
+        }
       }
     }
   }
@@ -126,6 +169,11 @@ class PubSubProtocol {
 
     final msgLen = decodeVarint(varintBytes.toBytes());
     if (msgLen == 0) return Uint8List(0);
+    // As go-libp2p-pubsub's msgio reader: refuse a frame larger than the
+    // maximum before reading it, so a peer cannot make us buffer it.
+    if (msgLen < 0 || msgLen > maxMessageSize) {
+      throw FormatException('RPC of $msgLen bytes exceeds the maximum of $maxMessageSize bytes');
+    }
 
     // Read message bytes
     final result = BytesBuilder(copy: false);
@@ -181,11 +229,16 @@ class PubSubProtocol {
 
     // Create new lock for this stream creation
     final newLock = Completer<_PersistentStream>();
+    // The lock is completed with the error of a failed stream creation. When
+    // no concurrent caller waits on it, that error must not be reported as
+    // uncaught, which would terminate the isolate.
+    newLock.future.ignore();
     _streamCreationLocks[peerId] = newLock;
 
     try {
-      _log.fine('Creating new persistent stream to $peerId on protocol $protocolId');
-      final stream = await _host.newStream(peerId, [protocolId], p2p_context.Context());
+      _log.fine('Creating new persistent stream to $peerId on $protocols');
+      final stream = await _host.newStream(peerId, protocols, p2p_context.Context());
+      _negotiated[peerId] = stream.protocol();
 
       final persistentStream = _PersistentStream(
         stream: stream,
@@ -221,7 +274,8 @@ class PubSubProtocol {
   ///
   /// [peerId] is the recipient peer.
   /// [rpc] is the RPC message to send.
-  /// [protocolId] is the specific PubSub protocol ID to use.
+  /// [protocolId] is kept for compatibility: a new stream negotiates one of
+  /// [protocols] (see [protocolOf]).
   Future<void> sendRpc(PeerId peerId, pb.RPC rpc, String protocolId) async {
     _log.fine('Attempting to send RPC to $peerId on protocol $protocolId: ${rpc.toShortString()}');
     
@@ -247,11 +301,16 @@ class PubSubProtocol {
 
         // Encode with varint length prefix (matches go-libp2p-pubsub msgio framing)
         final msgBytes = rpc.writeToBuffer();
+        if (msgBytes.length > maxMessageSize) {
+          // A peer would reset the stream on this frame. Callers split large
+          // RPCs with splitRpc first.
+          throw RpcTooLargeException(msgBytes.length, maxMessageSize);
+        }
         final lengthPrefix = encodeVarint(msgBytes.length);
         final framed = BytesBuilder(copy: false);
         framed.add(lengthPrefix);
         framed.add(msgBytes);
-        await persistentStream.stream.write(framed.toBytes());
+        await persistentStream.write(framed.toBytes());
 
         _log.fine('RPC sent to $peerId on persistent stream successfully.');
         return; // Success
@@ -272,6 +331,8 @@ class PubSubProtocol {
         _outboundStreams.remove(peerId);
         rethrow;
         
+      } on RpcTooLargeException {
+        rethrow; // The stream is fine; only this RPC is refused.
       } on IdentifyTimeoutException catch (e, s) {
         // Identify timeout - peer may have gone offline. Handle gracefully.
         _log.fine('PubSubProtocol: Identify timeout sending RPC to $peerId. Peer unreachable: $e');
@@ -309,6 +370,7 @@ class PubSubProtocol {
 
   /// Closes the persistent stream to a peer (e.g., when peer disconnects).
   Future<void> closePeerStream(PeerId peerId) async {
+    _negotiated.remove(peerId);
     final stream = _outboundStreams.remove(peerId);
     if (stream != null) {
       _log.fine('Closing persistent stream to $peerId');
@@ -334,11 +396,128 @@ class PubSubProtocol {
     _outboundStreams.clear();
 
     // Unregister protocol handlers from the host
-    _host.removeStreamHandler(gossipSubIDv11);
-    // TODO: Unregister for other protocols if registered.
-    _log.fine('PubSubProtocol closed and stream handler for $gossipSubIDv11 unregistered.');
+    for (final protocol in protocols) {
+      _host.removeStreamHandler(protocol);
+    }
+    _log.fine('PubSubProtocol closed and stream handlers for $protocols unregistered.');
   }
 }
+
+/// Thrown by [PubSubProtocol.sendRpc] for an RPC larger than
+/// [PubSubProtocol.maxMessageSize].
+class RpcTooLargeException implements Exception {
+  final int size;
+  final int limit;
+  RpcTooLargeException(this.size, this.limit);
+  @override
+  String toString() => 'RpcTooLargeException: RPC of $size bytes exceeds the maximum of $limit bytes';
+}
+
+/// Splits [rpc] into RPCs of at most [limit] bytes each, as go-libp2p-pubsub's
+/// `RPC.split`: the published messages first, then the subscriptions and the
+/// control messages. An item that is larger than [limit] on its own is
+/// returned in an RPC of its own, which is still too large; the caller drops
+/// it.
+List<pb.RPC> splitRpc(pb.RPC rpc, int limit) {
+  if (rpc.writeToBuffer().length <= limit) return [rpc];
+  final parts = <pb.RPC>[];
+
+  // Published messages: sized incrementally (field tag + length + body).
+  var next = pb.RPC();
+  var nextSize = 0;
+  for (final msg in rpc.publish) {
+    final size = _embeddedSize(msg.writeToBuffer().length);
+    if (nextSize > 0 && nextSize + size > limit) {
+      parts.add(next);
+      next = pb.RPC();
+      nextSize = 0;
+    }
+    next.publish.add(msg);
+    nextSize += size;
+  }
+  if (nextSize > 0) parts.add(next);
+
+  // Everything else.
+  final rest = pb.RPC()..subscriptions.addAll(rpc.subscriptions);
+  if (rpc.hasControl()) rest.control = rpc.control;
+  if (rest.writeToBuffer().isEmpty) return parts;
+  if (rest.writeToBuffer().length <= limit) return parts..add(rest);
+
+  next = pb.RPC();
+  var items = 0; // Items in next.
+  void add(void Function(pb.RPC) put, void Function(pb.RPC) undo) {
+    put(next);
+    if (items > 0 && next.writeToBuffer().length > limit) {
+      undo(next);
+      parts.add(next);
+      next = pb.RPC();
+      put(next);
+      items = 0;
+    }
+    items++;
+  }
+
+  for (final sub in rpc.subscriptions) {
+    add((r) => r.subscriptions.add(sub), (r) => r.subscriptions.removeLast());
+  }
+  if (rpc.hasControl()) {
+    final ctl = rpc.control;
+    for (final graft in ctl.graft) {
+      add((r) => r.ensureControl().graft.add(graft), (r) => r.ensureControl().graft.removeLast());
+    }
+    for (final prune in ctl.prune) {
+      add((r) => r.ensureControl().prune.add(prune), (r) => r.ensureControl().prune.removeLast());
+    }
+    // IHAVE, IWANT and IDONTWANT can carry many IDs: split them per ID.
+    for (final ihave in ctl.ihave) {
+      for (final id in ihave.messageIDs) {
+        add((r) {
+          final c = r.ensureControl();
+          if (c.ihave.isEmpty || c.ihave.last.topicID != ihave.topicID) {
+            c.ihave.add(pb.ControlIHave()..topicID = ihave.topicID);
+          }
+          c.ihave.last.messageIDs.add(id);
+        }, (r) {
+          final last = r.ensureControl().ihave.last;
+          last.messageIDs.removeLast();
+          if (last.messageIDs.isEmpty) r.ensureControl().ihave.removeLast();
+        });
+      }
+    }
+    for (final iwant in ctl.iwant) {
+      for (final id in iwant.messageIDs) {
+        add((r) {
+          final c = r.ensureControl();
+          if (c.iwant.isEmpty) c.iwant.add(pb.ControlIWant());
+          c.iwant.last.messageIDs.add(id);
+        }, (r) {
+          final last = r.ensureControl().iwant.last;
+          last.messageIDs.removeLast();
+          if (last.messageIDs.isEmpty) r.ensureControl().iwant.removeLast();
+        });
+      }
+    }
+    for (final idontwant in ctl.idontwant) {
+      for (final id in idontwant.messageIDs) {
+        add((r) {
+          final c = r.ensureControl();
+          if (c.idontwant.isEmpty) c.idontwant.add(pb.ControlIDontWant());
+          c.idontwant.last.messageIDs.add(id);
+        }, (r) {
+          final last = r.ensureControl().idontwant.last;
+          last.messageIDs.removeLast();
+          if (last.messageIDs.isEmpty) r.ensureControl().idontwant.removeLast();
+        });
+      }
+    }
+  }
+  if (items > 0) parts.add(next);
+  return parts;
+}
+
+/// The size of an embedded message field (number < 16) with a body of
+/// [bodySize] bytes.
+int _embeddedSize(int bodySize) => 1 + encodeVarint(bodySize).length + bodySize;
 
 // Helper extension for short string representation of RPC for logging.
 extension RpcShortString on pb.RPC {

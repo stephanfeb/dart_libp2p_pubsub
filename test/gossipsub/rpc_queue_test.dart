@@ -104,7 +104,16 @@ class MockPeerId implements PeerId {
 // Mock PubSubProtocol
 class MockPubSubProtocol implements PubSubProtocol {
   @override
-  void Function(PeerId peerId)? onNewInboundPeer;
+  void Function(PeerId peerId, String protocol)? onNewInboundPeer;
+
+  @override
+  int maxMessageSize = 1 << 20;
+
+  @override
+  List<String> get protocols => const ['/meshsub/1.1.0'];
+
+  @override
+  String? protocolOf(PeerId peerId) => null;
 
   PeerId? lastPeerId;
   pb.RPC? lastRpc;
@@ -195,22 +204,18 @@ void main() {
       expect(queue.length, 0);
     });
 
-    test('add() increases queue length and attempts to send', () async {
+    test('add() sends the RPC at once', () async {
       final rpc = pb.RPC();
-      queue.add(rpc);
-      expect(queue.length, 1);
-      // Allow microtask to run for _trySend
+      expect(queue.add(rpc), isTrue);
       await Future.delayed(Duration.zero);
       expect(mockComms.sendRpcCallCount, 1);
       expect(mockComms.lastRpc, rpc);
       expect(mockComms.lastPeerId, mockPeerId);
       expect(mockComms.lastProtocolId, protocolId);
-      // After successful send, queue should be empty
       expect(queue.length, 0);
     });
 
     test('add() multiple RPCs are sent in order', () async {
-      // Create distinct RPCs by populating a field, e.g., publish list
       final rpc1 = pb.RPC()..publish.add(pb.Message()..data = Uint8List.fromList([1]));
       final rpc2 = pb.RPC()..publish.add(pb.Message()..data = Uint8List.fromList([2]));
       final rpc3 = pb.RPC()..publish.add(pb.Message()..data = Uint8List.fromList([3]));
@@ -223,54 +228,53 @@ void main() {
       queue.add(rpc1);
       queue.add(rpc2);
       queue.add(rpc3);
+      // rpc1 is being sent; rpc2 and rpc3 wait.
+      expect(queue.length, 2);
 
-      expect(queue.length, 3); // All added before first send completes
-
-      // Allow microtasks for all send operations
-      await Future.delayed(Duration.zero); // For first _trySend
-      await Future.delayed(Duration.zero); // For second _trySend (if needed, depends on async nature)
-      await Future.delayed(Duration.zero); // For third _trySend
-
-      expect(mockComms.sendRpcCallCount, 3);
+      await Future.delayed(Duration.zero);
+      expect(sentRPCs, [rpc1, rpc2, rpc3]);
       expect(queue.length, 0);
-      expect(sentRPCs.length, 3);
-      expect(sentRPCs[0], rpc1);
-      expect(sentRPCs[1], rpc2);
-      expect(sentRPCs[2], rpc3);
     });
 
-    test('_trySend stops on error and keeps message in queue', () async {
+    test('an RPC that fails to send is dropped and the next ones are sent', () async {
       final rpc1 = pb.RPC()..publish.add(pb.Message()..data = Uint8List.fromList([1]));
-      final rpc2 = pb.RPC()..publish.add(pb.Message()..data = Uint8List.fromList([2])); // This one should not be sent
-
-      mockComms.prepareToSendError(Exception('Send failed!'));
+      final rpc2 = pb.RPC()..publish.add(pb.Message()..data = Uint8List.fromList([2]));
+      var calls = 0;
+      mockComms.onSendRpc = (peerId, rpc, protocolId) {
+        calls++;
+        if (rpc == rpc1) throw Exception('Send failed!');
+      };
 
       queue.add(rpc1);
       queue.add(rpc2);
+      await Future.delayed(Duration.zero);
 
-      expect(queue.length, 2);
+      expect(calls, 2);
+      expect(mockComms.lastRpc, rpc2);
+      expect(queue.length, 0, reason: 'nothing stays stuck in the queue');
+    });
 
-      await Future.delayed(Duration.zero); // Allow _trySend to run
+    test('a full queue refuses RPCs, and urgent RPCs go first', () async {
+      final bounded = PeerRpcQueue(mockPeerId, mockComms, protocolId, maxSize: 3);
+      final hold = Completer<void>();
+      final sent = <int>[];
+      mockComms.onSendRpc = (peerId, rpc, protocolId) {
+        sent.add(rpc.publish.single.data.single);
+        return sent.length == 1 ? hold.future : Future.value();
+      };
+      pb.RPC rpc(int n) => pb.RPC()..publish.add(pb.Message()..data = [n]);
 
-      expect(mockComms.sendRpcCallCount, 1); // Only first attempt
-      expect(queue.length, 2); // Message remains due to error, second one not attempted
-      expect(mockComms.lastRpc, rpc1); // Attempted to send rpc1
+      expect(bounded.add(rpc(1)), isTrue); // Being sent.
+      expect(bounded.add(rpc(2)), isTrue);
+      expect(bounded.add(rpc(3)), isTrue);
+      expect(bounded.add(rpc(4), urgent: true), isTrue);
+      expect(bounded.length, 3);
+      expect(bounded.add(rpc(5)), isFalse); // Full.
+      expect(bounded.add(rpc(6), urgent: true), isFalse);
 
-      // Verify _isSending is false after error
-      // This is tricky to test directly without exposing _isSending or more complex mock.
-      // We can infer it by trying to add another message and seeing if it attempts to send.
-      mockComms.resetSendError(); // Allow next send to succeed
-      mockComms.sendRpcCallCount = 0; // Reset counter
-
-      final rpc3 = pb.RPC()..publish.add(pb.Message()..data = Uint8List.fromList([3]));
-      queue.add(rpc3); // Queue is now [rpc1, rpc2, rpc3]
-      expect(queue.length, 3);
-
-      // _trySend should be called because _isSending was reset by the error path.
-      // It will try to send rpc1, then rpc2, then rpc3.
-      await Future.delayed(Duration.zero); // Allow the new _trySend to process the whole queue
-      expect(mockComms.sendRpcCallCount, 3, reason: "rpc1, rpc2, and rpc3 should be sent");
-      expect(queue.length, 0, reason: "Queue should be empty after all messages are sent");
+      hold.complete();
+      await Future.delayed(Duration.zero);
+      expect(sent, [1, 4, 2, 3]);
     });
 
     test('clear() removes all messages from the queue', () async {
@@ -299,40 +303,29 @@ void main() {
       expect(queue.length, 0, reason: "Queue should be empty after rpc3 sent");
     });
 
-     test('_trySend does not run concurrently', () async {
+    test('sends one RPC at a time', () async {
       final rpc1 = pb.RPC()..publish.add(pb.Message()..data = Uint8List.fromList([1]));
       final rpc2 = pb.RPC()..publish.add(pb.Message()..data = Uint8List.fromList([2]));
-
       final sendCompleter1 = Completer<void>();
-      int actualSends = 0;
-
-      mockComms.onSendRpc = (p, r, protoId) { // Explicitly async for clarity if returning Future
+      var actualSends = 0;
+      mockComms.onSendRpc = (p, r, protoId) {
         actualSends++;
-        if (r == rpc1) {
-          return sendCompleter1.future; // This future will be awaited by PeerRpcQueue
-        }
-        return Future.value(); // Other sends complete immediately
+        return r == rpc1 ? sendCompleter1.future : Future.value();
       };
 
-      queue.add(rpc1); // This will call _trySend, which will await sendCompleter1.future
-      await Future.delayed(Duration.zero); // Let the first _trySend start and hang
+      queue.add(rpc1);
+      await Future.delayed(Duration.zero);
+      expect(actualSends, 1);
 
-      expect(actualSends, 1); // First send initiated
-      expect(queue.length, 1); // rpc1 is in queue, being "sent"
-
-      // Now add another RPC. If _isSending works, _trySend should not start a new send loop.
       queue.add(rpc2);
-      expect(queue.length, 2); // rpc2 added to queue
-      await Future.delayed(Duration.zero); // Give time for a potential second _trySend
+      expect(queue.length, 1);
+      await Future.delayed(Duration.zero);
+      expect(actualSends, 1, reason: 'rpc2 waits for rpc1');
 
-      expect(actualSends, 1); // Still only 1 send initiated, because the first one is "in progress"
-
-      // Now complete the first send
       sendCompleter1.complete();
-      await Future.delayed(Duration.zero); // Allow the first send to complete and the loop to continue
-
-      expect(actualSends, 2); // Second send (rpc2) should now have occurred
-      expect(queue.length, 0); // Both messages processed
+      await Future.delayed(Duration.zero);
+      expect(actualSends, 2);
+      expect(queue.length, 0);
     });
   });
 

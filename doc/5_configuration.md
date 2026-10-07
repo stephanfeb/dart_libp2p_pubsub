@@ -42,7 +42,7 @@ These parameters control the number of peers in your node's mesh for any given t
 
 ### Heartbeat
 
-The heartbeat is the router's periodic task. It keeps each mesh between `DLow` and `DHigh` peers, refreshes peer scores and expires fanout state.
+The heartbeat is the router's periodic task, as in go-libp2p-pubsub. It keeps each mesh between `DLow` and `DHigh` peers, prunes mesh peers with a negative score, maintains the fanouts, gossips the IDs of recent messages (`IHAVE`) and penalises peers that did not deliver messages they advertised.
 
 -   `heartbeatInterval` (default: `1 second`): The time between heartbeats.
 -   `heartbeatInitialDelay` (default: `100 ms`): The time from `GossipSubRouter.start()` to the first heartbeat.
@@ -52,7 +52,7 @@ These defaults are go-libp2p-pubsub's. All nodes in a network should use the sam
 
 ### Joining and Leaving Topics
 
-When the node subscribes to a topic, the router sends `GRAFT` to up to `D` peers at once. It picks them first from the topic's fanout, then from the other connected peers subscribed to the topic, and leaves out peers with a score below `DScore`. When the node unsubscribes, the router sends `PRUNE` to each of its mesh peers for the topic.
+When the node subscribes to a topic, the router sends `GRAFT` to up to `D` peers at once. It picks them first from the topic's fanout, then from the other connected peers subscribed to the topic, and leaves out peers with a negative score or in a backoff. When the node unsubscribes, the router sends `PRUNE` to each of its mesh peers for the topic.
 
 -   `unsubscribeBackoff` (default: `10 seconds`): The backoff in the `PRUNE` messages sent on unsubscribe. It asks the pruned peers not to `GRAFT` the node again for this time.
 
@@ -72,16 +72,25 @@ The "fanout" is the set of peers you send full messages to for a topic you are *
 **Tuning Advice**:
 *   If your application publishes infrequently to many topics, a shorter `fanoutTTL` can reduce memory usage.
 
-### Peer Scoring and Grafting
+### Mesh Degree and Gossip
 
-These parameters control how peer scores affect mesh management.
+The defaults are go-libp2p-pubsub's.
 
--   `DScore` (default: `0.0`): The minimum score a peer must have to be included or remain in the mesh. Peers with scores below this are more likely to be pruned.
--   `opportunisticGraftScoreThreshold` (default: `10.0`): During heartbeats, if the mesh is not full, the router can "opportunistically" `GRAFT` onto peers with a score above this threshold. This helps strengthen the mesh with known good actors.
+-   `D` (6), `DLow` (5), `DHigh` (12): the target mesh size and its bounds. The heartbeat GRAFTs peers below `DLow` and PRUNEs back to `D` at `DHigh` or more.
+-   `DScore` (4): when pruning an oversized mesh, the number of peers kept for their score; the rest are kept at random.
+-   `DOut` (2): the number of outbound peers (connections the node dialed) kept in each mesh, against Sybils that connect to the node. Must be below `DLow` and `D/2`.
+-   `DLazy` (6) and `gossipFactor` (0.25): each heartbeat gossips to `max(DLazy, gossipFactor * peers)` topic peers outside the mesh.
+-   `historyLength` (5) and `historyGossip` (3): messages stay in the message cache for 5 heartbeats, for `IWANT`; the last 3 are gossiped.
+-   `maxIHaveLength` (5000), `maxIHaveMessages` (10), `iwantFollowupTime` (3 s), `gossipRetransmission` (3): limits on gossip from and to a peer. A peer that does not deliver a message it advertised within `iwantFollowupTime` gets a behaviour penalty.
+-   `floodPublish` (true): the node's own messages go to every topic peer with a score of at least `publishThreshold`, not only to the mesh.
+-   `opportunisticGraftTicks` (60) and `opportunisticGraftPeers` (2): when the median score of a mesh is below `opportunisticGraftThreshold`, the heartbeat GRAFTs up to 2 peers that score above the median.
+-   IDONTWANT (GossipSub v1.2): for a received message of at least `idontwantMessageThreshold` (1 KiB) bytes, the node tells its v1.2 mesh peers not to send it a copy.
 
-**Tuning Advice**:
-*   In a network where you expect malicious actors, you might increase these thresholds to be more selective about who you connect to.
-*   Setting these too high can make it difficult to form a mesh in a new or small network.
+`D = DLow = DHigh = DOut = DScore = 0` is the bootstrapper setting: no mesh.
+
+### Protocols
+
+`GossipSubRouter` speaks `/meshsub/1.2.0`, `/meshsub/1.1.0`, `/meshsub/1.0.0` and `/floodsub/1.0.0`, in that order of preference, and uses the features of the protocol negotiated with each peer. FloodSub peers get every message of their topics. `FloodSubRouter` and `RandomSubRouter` are also available.
 
 ### Message Validation
 
@@ -91,34 +100,44 @@ These parameters control how peer scores affect mesh management.
 
 See [Validating Messages](./2_gossipsub_usage.md#6-validating-messages).
 
-### Invalid-Message Penalty (P3b)
+### Peer Scoring
 
-Peer scoring is always on: each `PubSub` uses `PeerScoreParams.defaultParams` unless you pass `scoreParams`. When validation rejects a message, the peer that delivered it gets a penalty on the topic of `invalidMessageDeliveriesWeight * counter^2` (P3b in the GossipSub v1.1 specification). Each rejected message adds 1 to the counter. The penalty applies at once; the counter is multiplied by `invalidMessageDeliveriesDecay` once per `decayInterval` and set to 0 when it falls below `decayToZero`. `ignore` results give no penalty.
-
--   `invalidMessageDeliveriesWeight` (`TopicScoreParams`, default: `-1.0`): 1 rejected message gives -1, 2 give -4, 4 give -16, 10 give -100 (the default `graylistThreshold`). A peer with a negative score is not chosen for the mesh, fanout or gossip in normal selection. `0` turns the penalty off.
--   `invalidMessageDeliveriesDecay` (`TopicScoreParams`, default: `0.9987`): With the default `decayInterval` of 1 second, the counter for one message decays to zero in about 1 hour (as `ScoreParameterDecay(time.Hour)` in go-libp2p-pubsub). If you change `decayInterval`, change this too.
--   `retainScore` (`PeerScoreParams`, default: `1 hour`): How long the score of a disconnected peer is kept, so that the peer cannot clear its penalties by reconnecting. The score is deleted when the peer has been disconnected for this time. Keep it at least as long as your penalties take to decay.
+Peer scoring is off by default, as in go-libp2p-pubsub. Turn it on by giving the router both score parameters and thresholds (go-libp2p-pubsub's `WithPeerScore`):
 
 ```dart
-final scoreParams = PeerScoreParams(
-  defaultTopicParams: TopicScoreParams(
-    invalidMessageDeliveriesWeight: -10.0, // stricter: 4 invalid messages => -160
-    invalidMessageDeliveriesDecay: 0.9987,
+final router = GossipSubRouter(
+  scoreParams: PeerScoreParams(
+    topics: {
+      'chat': TopicScoreParams(
+        topicWeight: 1,
+        invalidMessageDeliveriesWeight: -10, // P4: weight * count^2
+        invalidMessageDeliveriesDecay: scoreParameterDecay(const Duration(hours: 1)),
+      ),
+    },
+    behaviourPenaltyWeight: -10, // P7
+    behaviourPenaltyDecay: scoreParameterDecay(const Duration(hours: 1)),
   ),
-  topicParamsOverrides: {
-    'chat': TopicScoreParams(invalidMessageDeliveriesWeight: -1.0),
-  },
+  scoreThresholds: const PeerScoreThresholds(
+    gossipThreshold: -10,
+    publishThreshold: -50,
+    graylistThreshold: -80,
+    acceptPXThreshold: 10,
+    opportunisticGraftThreshold: 5,
+  ),
 );
-final pubsub = PubSub(host, router, scoreParams: scoreParams);
 ```
 
-**Tuning Advice**:
-*   The defaults are a moderate starting point. Tune the weight to how much one invalid message on your topic is worth, relative to `graylistThreshold` and `DScore`.
-*   Note that `topicParamsOverrides` replaces all the parameters of a topic, so set the P3b fields in each override.
+The score follows go-libp2p-pubsub's `score.go`: per scored topic, P1 (time in mesh), P2 (first deliveries), P3 (mesh delivery deficit), P3b (mesh failure penalty) and P4 (invalid messages), weighted by `topicWeight` and capped by `topicScoreCap`; then P5 (application-specific), P6 (IP colocation) and P7 (behaviour penalty). Only the topics in `topics` are scored. Both parameter sets are validated with go-libp2p-pubsub's rules. `router.score` gives each peer's score and its components (`snapshot`).
+
+The thresholds: below `gossipThreshold` a peer gets no gossip and its gossip is ignored; below `publishThreshold` it gets none of our published messages; below `graylistThreshold` its RPCs are ignored. With all thresholds at 0, any negative score graylists a peer.
+
+-   `retainScore` (`PeerScoreParams`, default: `1 hour`): how long the score of a disconnected peer with a score of 0 or less is kept, so that the peer cannot clear its penalties by reconnecting.
 
 ### Prune and Peer Exchange (PX)
 
--   `prunePeers` (default: `5`): The number of alternative peers (from your own mesh) to include in a `PRUNE` message sent to another peer. This is the Peer Exchange (PX) mechanism, which helps the pruned peer find new connections and maintain network connectivity.
+Peer Exchange is off by default, as in go-libp2p-pubsub (`WithPeerExchange`); `GossipSubRouter(doPX: true)` turns it on, for bootstrappers and other well-connected nodes.
+
+-   `prunePeers` (default: `16`): The number of other topic peers with a score of 0 or more to include in a `PRUNE`. No PX is sent to a peer pruned for a negative score.
 
 **Tuning Advice**:
 *   A higher value can help pruned peers reconnect faster, improving overall network health.

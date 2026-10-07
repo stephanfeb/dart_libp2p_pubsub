@@ -3,24 +3,56 @@ import 'package:dart_libp2p_pubsub/src/gossipsub/gossipsub.dart';
 import 'package:dart_libp2p_pubsub/src/core/pubsub.dart';
 import 'dart:typed_data'; // For Uint8List
 
-import 'package:dart_libp2p_pubsub/src/core/comm.dart'; // For PubSubProtocol
+import 'package:dart_libp2p_pubsub/src/core/comm.dart'; // For PubSubProtocol and protocol IDs
 import 'package:dart_libp2p_pubsub/src/tracing/tracer.dart'; // For EventTracer
 import 'package:dart_libp2p_pubsub/src/pb/trace.pb.dart' as trace_pb; // For trace event types
 import 'package:dart_libp2p_pubsub/src/pb/rpc.pb.dart' as pb; // For RPC message types
-import 'package:dart_libp2p_pubsub/src/core/topic.dart'; // For Topic
+import 'package:dart_libp2p_pubsub/src/core/topic.dart';
+import 'package:dart_libp2p_pubsub/src/core/router.dart' show AcceptStatus; // For Topic
 import 'package:dart_libp2p_pubsub/src/core/message.dart'; // For PubSubMessage
 import 'package:dart_libp2p_pubsub/src/util/midgen.dart'; // For defaultMessageIdFn
-import 'package:dart_libp2p_pubsub/src/gossipsub/score.dart'; // For PeerScore
 import 'package:dart_libp2p_pubsub/src/gossipsub/score_params.dart'; // For PeerScoreParams
 import 'package:dart_libp2p/core/host/host.dart';
 import 'package:dart_libp2p/core/peer/peer_id.dart';
 import 'package:dart_libp2p/core/network/network.dart'; // Added Network import
 import 'package:dart_libp2p/core/connmgr/conn_manager.dart'; // For ConnManager
+import 'package:dart_libp2p/core/multiaddr.dart';
+import 'package:dart_libp2p/core/network/common.dart' show Direction;
+import 'package:dart_libp2p/core/network/conn.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:mockito/mockito.dart';
 import 'package:mockito/annotations.dart';
 import 'package:fake_async/fake_async.dart'; // Import for FakeAsync
 import 'gossipsub_test.mocks.dart'; // Generated mocks
+
+/// Answers a stubbed PubSub.validateMessage as the real one does: marks the
+/// message seen (its signature is taken as valid), then returns [result].
+Future<ValidationResult> _validated(Invocation invocation, ValidationResult result) async {
+  final markSeen = invocation.namedArguments[#markSeen] as bool Function()?;
+  if (markSeen != null && !markSeen()) return ValidationResult.ignore;
+  return result;
+}
+
+/// A connection that only answers what GossipSubRouter.addPeer reads: its
+/// direction and its (loopback, so not IP-scored) remote address.
+class _FakeConn extends Fake implements Conn {
+  final Direction direction;
+  _FakeConn(this.direction);
+
+  @override
+  ConnStats get stat => _FakeConnStats(Stats(direction: direction, opened: DateTime(2020)));
+
+  @override
+  MultiAddr get remoteMultiaddr => MultiAddr('/ip4/127.0.0.1/tcp/4001');
+}
+
+class _FakeConnStats extends ConnStats {
+  const _FakeConnStats(Stats stats) : super(stats: stats, numStreams: 0);
+}
+
+/// Score thresholds for the tests that enable scoring; a slightly negative
+/// score is neither graylisted nor below the publish threshold.
+const _testThresholds = PeerScoreThresholds(gossipThreshold: -10, publishThreshold: -50, graylistThreshold: -80);
 
 // Use build_runner: dart pub run build_runner build --delete-conflicting-outputs
 @GenerateMocks([Host, PubSub, PeerId, EventTracer, PubSubProtocol, Network, ConnManager]) // Added ConnManager
@@ -36,6 +68,32 @@ void main() {
     late MockPubSubProtocol mockComms;
     late GossipSubParams gossipSubParams;
 
+    /// The app-specific scores of the peers, which are their scores with
+    /// [scoredRouter] (weight 1, nothing else scored).
+    late Map<PeerId, double> scores;
+
+    /// A router with scoring enabled, where the score of a peer added with
+    /// [setScore] is its entry in [scores]. [topics] are the scored topics.
+    /// Peer Exchange is on ([doPX]), so that tests can check when PX is
+    /// withheld.
+    GossipSubRouter scoredRouter(GossipSubParams params,
+            {PeerScoreThresholds thresholds = _testThresholds,
+            Map<String, TopicScoreParams> topics = const {},
+            bool doPX = true}) =>
+        GossipSubRouter(
+          params: params,
+          scoreParams: PeerScoreParams(topics: topics, appSpecificScore: (p) => scores[p] ?? 0, appSpecificWeight: 1),
+          scoreThresholds: thresholds,
+          doPX: doPX,
+        );
+
+    /// Gives [peer] the score [score] with router [r] (made by
+    /// [scoredRouter]), adding the peer to the router so it is scored.
+    void setScore(GossipSubRouter r, PeerId peer, double score) {
+      scores[peer] = score;
+      r.addPeer(peer, '/meshsub/1.1.0');
+    }
+
     setUp(() async {
       mockHost = MockHost();
       mockPubsub = MockPubSub();
@@ -47,6 +105,7 @@ void main() {
       when(mockLocalPeerId.toBase58()).thenReturn('QmMockLocalPeerId'); // Added stub for toBase58
       mockTracer = MockEventTracer();
       mockComms = MockPubSubProtocol();
+      when(mockComms.maxMessageSize).thenReturn(1 << 20);
 
       // Setup mocks for PubSub instance
       when(mockPubsub.host).thenReturn(mockHost);
@@ -54,16 +113,16 @@ void main() {
       when(mockHost.network).thenReturn(mockNetwork); // Stub host.network
       when(mockHost.connManager).thenReturn(mockConnManager); // Stub host.connManager
       when(mockNetwork.peers).thenReturn([]); // Default stub for network.peers
+      // No connections: every peer added to the router is inbound.
+      when(mockNetwork.connsToPeer(any)).thenReturn([]);
       when(mockConnManager.protect(any, any)).thenReturn(null); // Stub protect
       when(mockConnManager.unprotect(any, any)).thenReturn(true); // Stub unprotect
       when(mockPubsub.comms).thenReturn(mockComms);
+      when(mockPubsub.messageIdFn).thenReturn(defaultMessageIdFn);
       when(mockPubsub.tracer).thenReturn(mockTracer);
       when(mockPubsub.getTopics()).thenReturn([]); // Default behavior
-      when(mockPubsub.getPeerScore(any)).thenReturn(0.0); // Default score for any peer
       // Mock methods that don't return a value and might be called
-      when(mockPubsub.addPeer(any, any)).thenAnswer((_) async => {});
       when(mockPubsub.removePeer(any)).thenAnswer((_) async => {});
-      when(mockPubsub.refreshScores()).thenAnswer((_) => {});
       when(mockTracer.trace(any)).thenAnswer((_) => {});
       when(mockTracer.start()).thenAnswer((_) async => {});
       when(mockTracer.stop()).thenAnswer((_) async => {});
@@ -73,15 +132,16 @@ void main() {
       // Use the GossipSubParams defined in gossipsub.dart
       gossipSubParams = GossipSubParams(
         D: 6, // Default is 6
-        DLow: 4, // Default is 4
+        DLow: 4, // Default is 5
         DHigh: 12, // Default is 12
-        DScore: 0.0, // Default is 0.0
+        DScore: 4, // Default is 4
         fanoutTTL: Duration(seconds: 60), // Default is 1 minute
         DLazy: 6, // Default is 6
         // Add other params if needed for specific tests, otherwise defaults are used
       );
-      
-      router = GossipSubRouter(params: gossipSubParams);
+
+      scores = {};
+      router = scoredRouter(gossipSubParams);
       await router.attach(mockPubsub);
       // Start the router to initialize heartbeat, etc.
       // Note: router.start() calls _mcache.start() and sets up _heartbeatTimer.
@@ -111,11 +171,14 @@ void main() {
         when(mockRemotePeerId.toBase58()).thenReturn('QmRemotePeer');
       });
 
-      test('addPeer should notify PubSub and trace event', () async {
+      test('addPeer starts scoring the peer and traces the event', () async {
+        expect(router.score!.snapshot(mockRemotePeerId), isNull);
+
         await router.addPeer(mockRemotePeerId, testProtocolId);
 
-        verify(mockPubsub.addPeer(mockRemotePeerId, testProtocolId)).called(1);
-        
+        expect(router.score!.snapshot(mockRemotePeerId), isNotNull);
+        expect(router.score!.score(mockRemotePeerId), equals(0));
+
         final capturedTrace = verify(mockTracer.trace(captureAny)).captured.single as trace_pb.TraceEvent;
         expect(capturedTrace.type, equals(trace_pb.TraceEvent_Type.ADD_PEER));
         expect(capturedTrace.peerID, equals(mockRemotePeerId.toBytes()));
@@ -228,7 +291,7 @@ void main() {
         final disconnectedPeer = makePeer(30);
         final lowScorePeer = makePeer(31);
         when(mockNetwork.peers).thenReturn([fanoutPeer, ...topicPeers, lowScorePeer]);
-        when(mockPubsub.getPeerScore(lowScorePeer)).thenReturn(-1.0);
+        setScore(router, lowScorePeer, -1);
         for (final peer in [...topicPeers, disconnectedPeer, lowScorePeer]) {
           await subscribeRemote(peer, testTopicName);
         }
@@ -299,6 +362,77 @@ void main() {
         verify(mockConnManager.protect(peer, 'gossipsub-mesh')).called(1);
       });
 
+      test('a GRAFT from a peer with a negative score is refused with a PRUNE without PX', () async {
+        final peer = makePeer(57);
+        final otherPeer = makePeer(58); // A PX candidate, were PX allowed.
+        when(mockNetwork.peers).thenReturn([peer, otherPeer]);
+        await subscribeRemote(otherPeer, testTopicName);
+        await router.join(testTopic);
+        router.mesh[testTopicName]!.clear();
+        setScore(router, peer, -1);
+        final sent = captureSentRpcs();
+
+        await router.handleRpc(peer, graftRpc(testTopicName));
+        await pumpEventQueue();
+
+        expect(router.mesh[testTopicName], isEmpty);
+        final prune = sent[peer]!.single.control.prune.single;
+        expect(prune.topicID, equals(testTopicName));
+        expect(prune.backoff.toInt(), equals(gossipSubParams.pruneBackoff.inSeconds));
+        expect(prune.peers, isEmpty);
+        verifyNever(mockConnManager.protect(peer, any));
+      });
+
+      test('a GRAFT from an inbound peer is refused when the mesh has DHigh peers; an outbound peer is accepted',
+          () async {
+        final meshPeers = [for (var i = 0; i < gossipSubParams.DHigh; i++) makePeer(100 + i)];
+        final inboundPeer = makePeer(60);
+        final outboundPeer = makePeer(61);
+        when(mockNetwork.connsToPeer(outboundPeer)).thenReturn([_FakeConn(Direction.outbound)]);
+        final pxPeer = makePeer(62); // A connected topic peer, offered as PX.
+        when(mockNetwork.peers).thenReturn([pxPeer, inboundPeer, outboundPeer]);
+        await subscribeRemote(pxPeer, testTopicName);
+        await router.addPeer(inboundPeer, '/meshsub/1.1.0');
+        await router.addPeer(outboundPeer, '/meshsub/1.1.0');
+        await router.join(testTopic);
+        router.mesh[testTopicName]!.addAll(meshPeers);
+        final sent = captureSentRpcs();
+
+        await router.handleRpc(inboundPeer, graftRpc(testTopicName));
+        await pumpEventQueue();
+
+        expect(router.mesh[testTopicName], isNot(contains(inboundPeer)));
+        final prune = sent[inboundPeer]!.single.control.prune.single;
+        expect(prune.topicID, equals(testTopicName));
+        // A peer refused because the mesh is full gets PX.
+        expect(prune.peers.map((px) => px.peerID), [pxPeer.toBytes()]);
+
+        // As go-libp2p-pubsub's handleGraft: the mesh may exceed DHigh for
+        // outbound peers (the heartbeat trims it, keeping DOut outbound).
+        await router.handleRpc(outboundPeer, graftRpc(testTopicName));
+        await pumpEventQueue();
+
+        expect(router.mesh[testTopicName], contains(outboundPeer));
+        expect(sent[outboundPeer], isNull);
+      });
+
+      test('without doPX (the default), PRUNEs carry no Peer Exchange', () async {
+        final r = GossipSubRouter(params: gossipSubParams);
+        await r.attach(mockPubsub);
+        final meshPeer = makePeer(70);
+        final other = makePeer(71);
+        when(mockNetwork.peers).thenReturn([meshPeer, other]);
+        await r.handleRpc(other, pb.RPC()..subscriptions.add(pb.RPC_SubOpts()..subscribe = true..topicid = testTopicName));
+        await r.join(testTopic);
+        r.mesh[testTopicName]!.add(meshPeer);
+        final sent = captureSentRpcs();
+
+        await r.leave(testTopic);
+        await pumpEventQueue();
+
+        expect(sent[meshPeer]!.single.control.prune.single.peers, isEmpty);
+      });
+
       test('removePeer forgets the subscriptions of the peer', () async {
         final peer = makePeer(50);
         when(mockNetwork.peers).thenReturn([peer]);
@@ -349,10 +483,12 @@ void main() {
         await router.join(testTopic); // Second join
 
         expect(router.mesh[testTopicName], same(meshPeers)); // Should be the same set instance
-        expect(verify(mockTracer.trace(captureAny)).captured.where((t) => (t as trace_pb.TraceEvent).type == trace_pb.TraceEvent_Type.JOIN).length, equals(2));
+        // As go-libp2p-pubsub's Join: joining a joined topic does nothing,
+        // not even a JOIN trace.
+        expect(verify(mockTracer.trace(captureAny)).captured.where((t) => (t as trace_pb.TraceEvent).type == trace_pb.TraceEvent_Type.JOIN).length, equals(1));
       });
 
-      test('leaving a topic not joined should not error and trace normally', () async {
+      test('leaving a topic not joined should not error and traces nothing', () async {
         const anotherTopicName = 'another-topic';
         final anotherTopic = Topic(anotherTopicName);
 
@@ -360,11 +496,9 @@ void main() {
 
         expect(router.mesh, isNot(contains(anotherTopicName)));
         expect(router.fanout, isNot(contains(anotherTopicName)));
-        
-        final capturedTrace = verify(mockTracer.trace(captureAny)).captured.last as trace_pb.TraceEvent;
-        expect(capturedTrace.type, equals(trace_pb.TraceEvent_Type.LEAVE));
-        expect(capturedTrace.peerID, equals(mockLocalPeerId.toBytes()));
-        expect(capturedTrace.leave.topic, equals(anotherTopicName));
+        // As go-libp2p-pubsub's Leave: leaving a topic not joined does
+        // nothing, not even a LEAVE trace.
+        verifyNever(mockTracer.trace(any));
       });
     });
 
@@ -457,14 +591,63 @@ void main() {
         expect(pruneTrace.prune.peerID, equals(mockRpcPeerId.toBytes()));
       });
 
+      test('handleRpc with a PRUNE asking for a huge backoff caps it instead of throwing', () async {
+        await router.join(Topic(testTopicName));
+        router.mesh[testTopicName]!.add(mockRpcPeerId);
+
+        // 2^62 seconds overflows a Duration; 2^64-1 decodes as a negative Int64.
+        for (final backoff in [Int64(1) << 62, Int64(-1)]) {
+          router.mesh[testTopicName]!.add(mockRpcPeerId);
+          final rpc = pb.RPC()
+            ..control = (pb.ControlMessage()
+              ..prune.add(pb.ControlPrune()
+                ..topicID = testTopicName
+                ..backoff = backoff));
+          await router.handleRpc(mockRpcPeerId, rpc);
+          expect(router.mesh[testTopicName], isNot(contains(mockRpcPeerId)));
+        }
+      });
+
+      test('handleRpc with IWANT sends each message once and stops after gossipRetransmission requests', () async {
+        final msg = pb.Message()
+          ..from = mockLocalPeerId.toBytes()
+          ..data = [1, 2, 3]
+          ..seqno = [4, 4, 4]
+          ..topic = testTopicName;
+        when(mockComms.sendRpc(any, any, any)).thenAnswer((_) async {});
+        await router.publish(PubSubMessage(rpcMessage: msg, receivedFrom: mockLocalPeerId));
+        final msgId = defaultMessageIdFn(msg);
+
+        final sent = <pb.RPC>[];
+        clearInteractions(mockComms);
+        when(mockComms.sendRpc(mockRpcPeerId, any, any)).thenAnswer((invocation) async {
+          sent.add(invocation.positionalArguments[1] as pb.RPC);
+        });
+
+        // The same ID many times in one IWANT: answered with one copy.
+        final iwant = pb.RPC()
+          ..control = (pb.ControlMessage()
+            ..iwant.add(pb.ControlIWant()..messageIDs.addAll(List.filled(1000, messageIdToBytes(msgId)))));
+        for (var i = 0; i < gossipSubParams.gossipRetransmission + 2; i++) {
+          await router.handleRpc(mockRpcPeerId, iwant);
+        }
+        await Future<void>.delayed(Duration.zero);
+
+        final copies = sent.expand((rpc) => rpc.publish).length;
+        expect(copies, equals(gossipSubParams.gossipRetransmission));
+      });
+
       test('handleRpc with IHAVE for unknown messages should respond with IWANT and trace events', () async {
         const unknownMsgId1 = 'unknown-msg-id-1';
         const unknownMsgId2 = 'unknown-msg-id-2';
-        
+        // As go-libp2p-pubsub's handleIHave: only the IHAVEs for joined
+        // topics are answered.
+        await router.join(Topic(testTopicName));
+
         // Router's mcache is fresh, so it hasn't seen these messages.
         final ihaveMessage = pb.ControlIHave()
           ..topicID = testTopicName
-          ..messageIDs.addAll([unknownMsgId1, unknownMsgId2]); // String IDs
+          ..messageIDs.addAll([unknownMsgId1.codeUnits, unknownMsgId2.codeUnits]);
         final controlMessage = pb.ControlMessage()..ihave.add(ihaveMessage);
         final rpc = pb.RPC()..control = controlMessage;
 
@@ -492,7 +675,7 @@ void main() {
         expect(sentRpcToPeer, isNotNull, reason: "IWANT RPC was not sent");
         expect(sentRpcToPeer!.control.iwant, isNotEmpty);
         expect(sentRpcToPeer!.control.iwant.first.messageIDs.length, equals(2));
-        expect(sentRpcToPeer!.control.iwant.first.messageIDs, containsAll([unknownMsgId1, unknownMsgId2])); // String IDs
+        expect(sentRpcToPeer!.control.iwant.first.messageIDs.map(messageIdFromBytes), containsAll([unknownMsgId1, unknownMsgId2]));
         
         // Verify SEND_RPC trace for the IWANT message
         // Given the bug in gossipsub.dart's IWANT trace population, 
@@ -556,7 +739,7 @@ void main() {
 
         final ihaveMessage = pb.ControlIHave()
           ..topicID = testTopicName
-          ..messageIDs.add(knownMsgIdString); // Advertise the String ID
+          ..messageIDs.add(messageIdToBytes(knownMsgIdString));
         final controlMessage = pb.ControlMessage()..ihave.add(ihaveMessage);
         final rpc = pb.RPC()..control = controlMessage;
 
@@ -610,9 +793,9 @@ void main() {
         // 2. Construct IWANT RPC from remote peer requesting these messages + one unknown
         final iwantMessage = pb.ControlIWant()
           ..messageIDs.addAll([
-            msg1Id, // String ID
-            msg2Id, // String ID
-            unknownMsgId, // String ID
+            messageIdToBytes(msg1Id),
+            messageIdToBytes(msg2Id),
+            messageIdToBytes(unknownMsgId),
           ]);
         final controlMessage = pb.ControlMessage()..iwant.add(iwantMessage);
         final rpc = pb.RPC()..control = controlMessage;
@@ -697,8 +880,17 @@ void main() {
         when(mockComms.sendRpc(any, any, any)).thenAnswer((_) async {});
       });
 
-      test('publish should send message to mesh peers and trace event', () async {
+      /// Replaces the router with one that does not flood publish, so that
+      /// our messages go to the mesh, or the fanout.
+      Future<void> useRouterWithoutFloodPublish() async {
+        await router.stop();
+        router = scoredRouter(GossipSubParams(floodPublish: false));
+        await router.attach(mockPubsub);
+      }
+
+      test('without flood publish, publish should send message to mesh peers and trace event', () async {
         // 1. Setup: Join topic, add mesh peers
+        await useRouterWithoutFloodPublish();
         await router.join(testTopic); // Join the topic to establish a mesh entry
         
         final mockMeshPeer1 = MockPeerId();
@@ -710,10 +902,6 @@ void main() {
         when(mockMeshPeer2.toBytes()).thenReturn(Uint8List.fromList([50,1,2]));
         when(mockMeshPeer2.toBase58()).thenReturn('QmMeshPeer2');
         router.mesh[testTopicName]!.add(mockMeshPeer2);
-
-        // Ensure peers have good scores to be selected
-        when(mockPubsub.getPeerScore(mockMeshPeer1)).thenReturn(0.0); // Assume 0 is acceptable
-        when(mockPubsub.getPeerScore(mockMeshPeer2)).thenReturn(0.0);
 
         // Capture RPCs sent
         final List<pb.RPC> sentRpcs = [];
@@ -771,7 +959,10 @@ void main() {
         expect(traceToMeshPeer2.sendRPC.meta.messages.first.topic, equals(testTopicName));
       });
 
-      test('publish sends IHAVE only to connected non-mesh peers subscribed to the topic', () async {
+      // As go-libp2p-pubsub with WithFloodPublish (the default): our own
+      // message goes to every connected peer of the topic with a score of
+      // at least the publish threshold, not only to the mesh.
+      test('flood publish sends our message to the connected topic peers above the publish threshold', () async {
         MockPeerId makePeer(int id, String name) {
           final peer = MockPeerId();
           when(peer.toBytes()).thenReturn(Uint8List.fromList([60, 1, id]));
@@ -782,9 +973,12 @@ void main() {
         final subscribedPeer = makePeer(2, 'QmSubscribed');
         final unsubscribedPeer = makePeer(3, 'QmUnsubscribed');
         final lowScorePeer = makePeer(4, 'QmLowScore');
-        when(mockNetwork.peers).thenReturn([meshPeer, subscribedPeer, unsubscribedPeer, lowScorePeer]);
-        when(mockPubsub.getPeerScore(lowScorePeer)).thenReturn(-1.0);
-        for (final peer in [meshPeer, subscribedPeer, lowScorePeer]) {
+        final slightlyNegativePeer = makePeer(5, 'QmSlightlyNegative');
+        when(mockNetwork.peers)
+            .thenReturn([meshPeer, subscribedPeer, unsubscribedPeer, lowScorePeer, slightlyNegativePeer]);
+        setScore(router, lowScorePeer, _testThresholds.publishThreshold - 1);
+        setScore(router, slightlyNegativePeer, -1);
+        for (final peer in [meshPeer, subscribedPeer, lowScorePeer, slightlyNegativePeer]) {
           await router.handleRpc(peer, pb.RPC()
             ..subscriptions.add(pb.RPC_SubOpts()
               ..subscribe = true
@@ -803,14 +997,15 @@ void main() {
         await router.publish(testPubSubMessage);
         await pumpEventQueue();
 
-        expect(sent.keys.toSet(), equals({meshPeer, subscribedPeer}));
-        expect(sent[meshPeer]!.single.publish.single, equals(testPbMessage));
-        final ihave = sent[subscribedPeer]!.single.control.ihave.single;
-        expect(ihave.topicID, equals(testTopicName));
-        expect(ihave.messageIDs, equals([testMessageId]));
+        expect(sent.keys.toSet(), equals({meshPeer, subscribedPeer, slightlyNegativePeer}));
+        for (final rpcs in sent.values) {
+          expect(rpcs.single.publish.single, equals(testPbMessage));
+          expect(rpcs.single.hasControl(), isFalse);
+        }
       });
 
-      test('publish should send message to fanout peers if not in mesh and fanoutTTL passed', () async {
+      test('without flood publish, publish should send message to fanout peers if not in mesh', () async {
+        await useRouterWithoutFloodPublish();
         // 1. Setup: Ensure NOT joined to topic, add fanout peer.
         // By not calling router.join(testTopic), we ensure it's not in the mesh.
         // The fanout map is populated by the heartbeat or when joining other topics.
@@ -824,9 +1019,6 @@ void main() {
         // Ensure fanoutLastPublished is clear for this topic so fanout occurs
         router.fanoutLastPublished.remove(testTopicName); 
         // Or ensure it's older than fanoutTTL, but removing is simpler for a test.
-
-        // Ensure peer has a good score
-        when(mockPubsub.getPeerScore(mockFanoutPeer1)).thenReturn(0.0);
 
         // Capture RPCs sent
         final List<pb.RPC> sentRpcs = [];
@@ -932,7 +1124,7 @@ void main() {
         when(mockTracer.trace(any)).thenAnswer((_) => {});
         when(mockComms.sendRpc(any, any, any)).thenAnswer((_) async {});
         // Default validation to accept
-        when(mockPubsub.validateMessage(any)).thenAnswer((_) async => ValidationResult.accept);
+        when(mockPubsub.validateMessage(any, markSeen: anyNamed('markSeen'))).thenAnswer((inv) => _validated(inv, ValidationResult.accept));
         when(mockPubsub.deliverMessage(any)).thenAnswer((_) {}); // Default for deliver
         when(mockPubsub.messageIdFn).thenReturn(defaultMessageIdFn); // Ensure router uses the same ID fn
          // Re-stub other pubsub interactions that might have been cleared and are needed by router
@@ -940,10 +1132,22 @@ void main() {
         when(mockPubsub.comms).thenReturn(mockComms);
         when(mockPubsub.tracer).thenReturn(mockTracer);
         when(mockPubsub.getTopics()).thenReturn([]);
-        when(mockPubsub.getPeerScore(any)).thenReturn(0.0);
-        when(mockPubsub.addPeer(any, any)).thenAnswer((_) async => {});
         when(mockPubsub.removePeer(any)).thenAnswer((_) async => {});
       });
+
+      /// Replaces the router with one that scores invalid message
+      /// deliveries on the test topic (P4 = -invalid^2).
+      Future<void> useRouterScoringInvalidMessages() async {
+        await router.stop();
+        router = scoredRouter(gossipSubParams, topics: {
+          testTopicName: TopicScoreParams(
+            topicWeight: 1,
+            invalidMessageDeliveriesWeight: -1,
+            invalidMessageDeliveriesDecay: 0.5,
+          ),
+        });
+        await router.attach(mockPubsub);
+      }
 
       test('should forward message from mesh peer to other mesh peers and deliver locally', () async {
         // 1. Setup
@@ -954,10 +1158,6 @@ void main() {
         when(mockOtherMeshPeer.toBytes()).thenReturn(Uint8List.fromList([60,1,2]));
         when(mockOtherMeshPeer.toBase58()).thenReturn('QmOtherMeshPeer');
         router.mesh[testTopicName]!.add(mockOtherMeshPeer);
-        
-        // Ensure scores are fine
-        when(mockPubsub.getPeerScore(mockSendingPeer)).thenReturn(0.0);
-        when(mockPubsub.getPeerScore(mockOtherMeshPeer)).thenReturn(0.0);
 
         // Capture RPCs sent for forwarding
         final List<PeerId> forwardedToPeers = [];
@@ -1033,9 +1233,8 @@ void main() {
         when(mockOtherMeshPeer.toBase58()).thenReturn('QmOtherMeshPeerForDup');
         router.mesh[testTopicName]!.add(mockOtherMeshPeer);
 
-        when(mockPubsub.getPeerScore(any)).thenReturn(0.0); // Ensure scores are fine
         // Ensure validateMessage is stubbed to accept for both passes
-        when(mockPubsub.validateMessage(any)).thenAnswer((_) async => ValidationResult.accept);
+        when(mockPubsub.validateMessage(any, markSeen: anyNamed('markSeen'))).thenAnswer((inv) => _validated(inv, ValidationResult.accept));
         when(mockPubsub.messageIdFn).thenReturn(defaultMessageIdFn);
 
 
@@ -1081,8 +1280,7 @@ void main() {
         when(mockPubsub.comms).thenReturn(mockComms); // Needed by router
         when(mockPubsub.tracer).thenReturn(mockTracer); // Needed by router
         when(mockPubsub.getTopics()).thenReturn([testTopicName]); // For _shouldProcessMessage
-        when(mockPubsub.getPeerScore(any)).thenReturn(0.0);
-        when(mockPubsub.validateMessage(any)).thenAnswer((_) async => ValidationResult.accept); // Still need validation before duplicate check
+        when(mockPubsub.validateMessage(any, markSeen: anyNamed('markSeen'))).thenAnswer((inv) => _validated(inv, ValidationResult.accept)); // Still need validation before duplicate check
         when(mockPubsub.messageIdFn).thenReturn(defaultMessageIdFn);
         when(mockPubsub.deliverMessage(any)).thenAnswer((_) { // This should NOT be called for duplicate
           fail('deliverMessage should not be called for a duplicate message');
@@ -1127,6 +1325,7 @@ void main() {
 
       test('should drop a rejected message, penalise the sender, and not validate its duplicates', () async {
         // 1. Setup: Join topic, add mesh peers
+        await useRouterScoringInvalidMessages();
         await router.join(testTopic);
         router.mesh[testTopicName]!.add(mockSendingPeer); // Sending peer is in our mesh
 
@@ -1135,15 +1334,12 @@ void main() {
         when(mockOtherMeshPeer.toBase58()).thenReturn('QmOtherMeshPeerForReject');
         router.mesh[testTopicName]!.add(mockOtherMeshPeer);
 
-        when(mockPubsub.getPeerScore(any)).thenReturn(0.0); // Scores are fine
         when(mockPubsub.messageIdFn).thenReturn(defaultMessageIdFn);
-        final senderScore = PeerScore(mockSendingPeer, PeerScoreParams.defaultParams);
-        final otherScore = PeerScore(mockOtherMeshPeer, PeerScoreParams.defaultParams);
-        when(mockPubsub.getPeerScoreObject(mockSendingPeer)).thenReturn(senderScore);
-        when(mockPubsub.getPeerScoreObject(mockOtherMeshPeer)).thenReturn(otherScore);
+        await router.addPeer(mockSendingPeer, '/meshsub/1.1.0');
+        await router.addPeer(mockOtherMeshPeer, '/meshsub/1.1.0');
 
         // Stub validateMessage to REJECT
-        when(mockPubsub.validateMessage(any)).thenAnswer((_) async => ValidationResult.reject);
+        when(mockPubsub.validateMessage(any, markSeen: anyNamed('markSeen'))).thenAnswer((inv) => _validated(inv, ValidationResult.reject));
 
         // Ensure deliverMessage and sendRpc are not called
         when(mockPubsub.deliverMessage(any)).thenAnswer((_) {
@@ -1161,10 +1357,10 @@ void main() {
 
         // 3. Verification
         expect(accepted, isEmpty);
-        verify(mockPubsub.validateMessage(any)).called(1);
+        verify(mockPubsub.validateMessage(any, markSeen: anyNamed('markSeen'))).called(1);
         // The delivering peer is penalised on the topic.
-        expect(senderScore.topicStats[testTopicName]?.invalidMessageDeliveries, 1);
-        expect(senderScore.score, lessThan(0));
+        expect(router.score!.snapshot(mockSendingPeer)!.topics[testTopicName]?.invalidMessageDeliveries, 1);
+        expect(router.score!.score(mockSendingPeer), lessThan(0));
 
         // Verify message was NOT delivered locally or forwarded
         verifyNever(mockPubsub.deliverMessage(any));
@@ -1185,13 +1381,14 @@ void main() {
         when(mockTracer.trace(any)).thenAnswer((_) => {});
         final acceptedDup = await router.handleRpc(mockOtherMeshPeer, incomingRpc);
         expect(acceptedDup, isEmpty);
-        verifyNever(mockPubsub.validateMessage(any));
-        expect(otherScore.topicStats[testTopicName]?.invalidMessageDeliveries, 1);
+        verifyNever(mockPubsub.validateMessage(any, markSeen: anyNamed('markSeen')));
+        expect(router.score!.snapshot(mockOtherMeshPeer)!.topics[testTopicName]?.invalidMessageDeliveries, 1);
         final dupTraces = verify(mockTracer.trace(captureAny)).captured.cast<trace_pb.TraceEvent>();
         expect(dupTraces.where((t) => t.type == trace_pb.TraceEvent_Type.DUPLICATE_MESSAGE), isNotEmpty);
       });
 
       test('should drop an ignored message without penalising the sender', () async {
+        await useRouterScoringInvalidMessages();
         await router.join(testTopic);
         router.mesh[testTopicName]!.add(mockSendingPeer);
         final mockOtherMeshPeer = MockPeerId();
@@ -1199,9 +1396,8 @@ void main() {
         when(mockOtherMeshPeer.toBase58()).thenReturn('QmOtherMeshPeerForIgnore');
         router.mesh[testTopicName]!.add(mockOtherMeshPeer);
 
-        final senderScore = PeerScore(mockSendingPeer, PeerScoreParams.defaultParams);
-        when(mockPubsub.getPeerScoreObject(any)).thenReturn(senderScore);
-        when(mockPubsub.validateMessage(any)).thenAnswer((_) async => ValidationResult.ignore);
+        await router.addPeer(mockSendingPeer, '/meshsub/1.1.0');
+        when(mockPubsub.validateMessage(any, markSeen: anyNamed('markSeen'))).thenAnswer((inv) => _validated(inv, ValidationResult.ignore));
         when(mockComms.sendRpc(any, any, any)).thenAnswer((_) async {
           fail('sendRpc should not be called for an ignored message');
         });
@@ -1209,8 +1405,8 @@ void main() {
         final accepted = await router.handleRpc(mockSendingPeer, incomingRpc);
 
         expect(accepted, isEmpty);
-        expect(senderScore.topicStats[testTopicName]?.invalidMessageDeliveries ?? 0, 0);
-        expect(senderScore.score, 0.0);
+        expect(router.score!.snapshot(mockSendingPeer)!.topics[testTopicName]?.invalidMessageDeliveries ?? 0, 0);
+        expect(router.score!.score(mockSendingPeer), 0.0);
         verifyNever(mockComms.sendRpc(any, any, any));
       });
     });
@@ -1229,75 +1425,58 @@ void main() {
         expect(router.isStarted, isTrue); // Verify restart
       });
 
-      test('heartbeat calls refreshScores periodically', () {
+      test('the scorer decays its counters every decay interval while the router runs', () {
         fakeAsync((async) {
-          // Stop the router started in the main setUp to control its lifecycle here
-          // and avoid interference from its existing timer.
           router.stop();
-          
-          // Create a new router instance for this test to ensure a clean timer state.
-          // Use a shorter fanoutTTL for faster testing if needed, or use default.
-          final testRouterParams = GossipSubParams(fanoutTTL: Duration(seconds: 1));
-          final testRouter = GossipSubRouter(params: testRouterParams);
-          
-          // We need a separate MockPubSub or be careful with interactions on the global mockPubsub.
-          // For simplicity, let's assume mockPubsub from the outer scope is okay if we clear interactions.
-          clearInteractions(mockPubsub); // Clear interactions from previous tests/setup.
-          
-          // Re-stub necessary methods for the new router instance.
-          // PubSub methods used by router.start() and router._heartbeat():
-          when(mockPubsub.host).thenReturn(mockHost); // From outer scope
-          when(mockPubsub.comms).thenReturn(mockComms); // From outer scope
-          when(mockPubsub.tracer).thenReturn(mockTracer); // From outer scope
-          when(mockPubsub.getTopics()).thenReturn([]); // Default for heartbeat's topic iteration
-          when(mockPubsub.refreshScores()).thenAnswer((_) => {}); // Key method to verify
-          when(mockPubsub.getPeerScore(any)).thenReturn(0.0); // For opportunistic grafting/mesh maint.
-
+          final peer = MockPeerId();
+          when(peer.toBytes()).thenReturn(Uint8List.fromList([0x00, 0x01, 0x40]));
+          when(peer.toBase58()).thenReturn('QmDecayPeer');
+          final testRouter = GossipSubRouter(
+            params: GossipSubParams(),
+            scoreParams: PeerScoreParams(
+              behaviourPenaltyWeight: -1,
+              behaviourPenaltyDecay: 0.5,
+              decayInterval: const Duration(seconds: 1),
+            ),
+            scoreThresholds: _testThresholds,
+          );
           testRouter.attach(mockPubsub);
+          testRouter.addPeer(peer, '/meshsub/1.1.0');
+          testRouter.score!.addPenalty(peer, 4);
+
           testRouter.start();
-
-          // Verify refreshScores is called upon the first effective heartbeat tick
-          async.elapse(testRouterParams.fanoutTTL);
-          verify(mockPubsub.refreshScores()).called(1);
-
-          // Verify it's called again on the next tick
-          async.elapse(testRouterParams.fanoutTTL);
-          verify(mockPubsub.refreshScores()).called(1); // This verifies it was called *another* time
-
-          // To check total calls, you might need to manage a counter or use `verify(mockPubsub.refreshScores()).called(2)`
-          // if Mockito's `called(1)` resets after each verification for the same method.
-          // Let's assume `called(1)` means "at least once since last clear or specific count".
-          // A more robust way for multiple calls:
-          clearInteractions(mockPubsub); // Clear again before next verification round
-          when(mockPubsub.refreshScores()).thenAnswer((_) => {}); // Re-stub
-          async.elapse(testRouterParams.fanoutTTL);
-          verify(mockPubsub.refreshScores()).called(1); // Called on the 3rd tick
+          async.elapse(const Duration(seconds: 1));
+          expect(testRouter.score!.snapshot(peer)!.behaviourPenalty, equals(2));
+          async.elapse(const Duration(seconds: 1));
+          expect(testRouter.score!.snapshot(peer)!.behaviourPenalty, equals(1));
 
           testRouter.stop();
+          async.elapse(const Duration(seconds: 5));
+          expect(testRouter.score!.snapshot(peer)!.behaviourPenalty, equals(1));
         });
       });
-      
+
       test('first heartbeat runs after the initial delay, then one every heartbeat interval', () {
         fakeAsync((async) {
           router.stop();
           final testRouter = GossipSubRouter(params: GossipSubParams());
-          clearInteractions(mockPubsub);
-          when(mockPubsub.refreshScores()).thenAnswer((_) => {});
-
           testRouter.attach(mockPubsub);
+          // With no topics, a heartbeat reads the connected peers once (to
+          // forget the disconnected ones); the router reads them nowhere else.
+          clearInteractions(mockNetwork);
           testRouter.start();
 
           async.elapse(const Duration(milliseconds: 99));
-          verifyNever(mockPubsub.refreshScores());
+          verifyNever(mockNetwork.peers);
           async.elapse(const Duration(milliseconds: 1));
-          verify(mockPubsub.refreshScores()).called(1);
+          verify(mockNetwork.peers).called(1);
 
           async.elapse(const Duration(seconds: 10));
-          verify(mockPubsub.refreshScores()).called(10);
+          verify(mockNetwork.peers).called(10);
 
           testRouter.stop();
           async.elapse(const Duration(seconds: 10));
-          verifyNever(mockPubsub.refreshScores());
+          verifyNever(mockNetwork.peers);
         });
       });
 
@@ -1336,15 +1515,13 @@ void main() {
         // Re-stub default behaviors
         when(mockTracer.trace(any)).thenAnswer((_) => {});
         when(mockComms.sendRpc(any, any, any)).thenAnswer((_) async {});
-        when(mockPubsub.validateMessage(any)).thenAnswer((_) async => ValidationResult.accept);
+        when(mockPubsub.validateMessage(any, markSeen: anyNamed('markSeen'))).thenAnswer((inv) => _validated(inv, ValidationResult.accept));
         when(mockPubsub.deliverMessage(any)).thenAnswer((_) {});
         when(mockPubsub.messageIdFn).thenReturn(defaultMessageIdFn);
         when(mockPubsub.host).thenReturn(mockHost);
         when(mockPubsub.comms).thenReturn(mockComms);
         when(mockPubsub.tracer).thenReturn(mockTracer);
         when(mockPubsub.getTopics()).thenReturn([testTopicName]); // Assume joined for mesh management
-        when(mockPubsub.getPeerScore(any)).thenReturn(0.0); // Default good score
-        when(mockPubsub.addPeer(any, any)).thenAnswer((_) async => {});
         when(mockPubsub.removePeer(any)).thenAnswer((_) async => {});
       });
 
@@ -1360,7 +1537,7 @@ void main() {
             D: 6, DLow: 4, DHigh: 12, DScore: 0, 
             fanoutTTL: Duration(seconds: 1) // Short TTL for testing
           );
-          final testRouter = GossipSubRouter(params: testRouterParams);
+          final testRouter = scoredRouter(testRouterParams);
 
           // Clear interactions for mocks from outer scope
           clearInteractions(mockPubsub);
@@ -1377,7 +1554,6 @@ void main() {
           when(mockPubsub.comms).thenReturn(mockComms);
           when(mockPubsub.tracer).thenReturn(mockTracer);
           when(mockPubsub.getTopics()).thenReturn([testTopicName]); // Router is subscribed
-          when(mockPubsub.refreshScores()).thenAnswer((_) => {});
           when(mockTracer.trace(any)).thenAnswer((_) => {});
           
           testRouter.attach(mockPubsub);
@@ -1410,30 +1586,19 @@ void main() {
           when(mockCandidatePeer6.toBytes()).thenReturn(Uint8List.fromList([70,1,6]));
           when(mockCandidatePeer6.toBase58()).thenReturn('QmCandidate6');
 
-          // Create PeerScore objects for each candidate peer
-          final scoreParams = PeerScoreParams.defaultParams;
-          final peerScore1 = PeerScore(mockCandidatePeer1, scoreParams)..score = 10.0;
-          final peerScore2 = PeerScore(mockCandidatePeer2, scoreParams)..score = 5.0;
-          final peerScore3 = PeerScore(mockCandidatePeer3, scoreParams)..score = -5.0; // Bad score, should be ignored
-          final peerScore4 = PeerScore(mockCandidatePeer4, scoreParams)..score = 8.0;
-          final peerScore5 = PeerScore(mockCandidatePeer5, scoreParams)..score = 7.0;
-          final peerScore6 = PeerScore(mockCandidatePeer6, scoreParams)..score = 6.0;
-
-          // Stub getPeerScoreObject instead of getPeerScore
-          when(mockPubsub.getPeerScoreObject(mockCandidatePeer1)).thenReturn(peerScore1);
-          when(mockPubsub.getPeerScoreObject(mockCandidatePeer2)).thenReturn(peerScore2);
-          when(mockPubsub.getPeerScoreObject(mockCandidatePeer3)).thenReturn(peerScore3);
-          when(mockPubsub.getPeerScoreObject(mockCandidatePeer4)).thenReturn(peerScore4);
-          when(mockPubsub.getPeerScoreObject(mockCandidatePeer5)).thenReturn(peerScore5);
-          when(mockPubsub.getPeerScoreObject(mockCandidatePeer6)).thenReturn(peerScore6);
-
+          // Give each candidate peer its score
+          setScore(testRouter, mockCandidatePeer1, 10.0);
+          setScore(testRouter, mockCandidatePeer2, 5.0);
+          setScore(testRouter, mockCandidatePeer3, -5.0); // Bad score, should be ignored
+          setScore(testRouter, mockCandidatePeer4, 8.0);
+          setScore(testRouter, mockCandidatePeer5, 7.0);
+          setScore(testRouter, mockCandidatePeer6, 6.0);
 
           // Connected, good score, but not subscribed to the topic.
           final mockUnsubscribedPeer = MockPeerId();
           when(mockUnsubscribedPeer.toBytes()).thenReturn(Uint8List.fromList([70,1,7]));
           when(mockUnsubscribedPeer.toBase58()).thenReturn('QmUnsubscribed');
-          when(mockPubsub.getPeerScoreObject(mockUnsubscribedPeer))
-              .thenReturn(PeerScore(mockUnsubscribedPeer, scoreParams)..score = 10.0);
+          setScore(testRouter, mockUnsubscribedPeer, 10.0);
 
           // Simulate these peers being available in the wider network
           when(mockNetwork.peers).thenReturn([
@@ -1490,11 +1655,14 @@ void main() {
         fakeAsync((async) {
           router.stop(); // Stop global router
           final testRouterParams = GossipSubParams(
-            D: 2, DLow: 1, DHigh: 3, DScore: 0, // D=2, DHigh=3 for this test
+            // D=2, DHigh=3 for this test; the DScore=2 best peers are kept
+            // (go-libp2p-pubsub keeps DScore peers by score, the rest of D
+            // at random). No outbound peers to keep (DOut=0).
+            D: 2, DLow: 1, DHigh: 3, DScore: 2, DOut: 0,
             fanoutTTL: Duration(seconds: 1),
             prunePeers: 2 // For PX
           );
-          final testRouter = GossipSubRouter(params: testRouterParams);
+          final testRouter = scoredRouter(testRouterParams);
 
           clearInteractions(mockPubsub);
           clearInteractions(mockComms);
@@ -1507,7 +1675,6 @@ void main() {
           when(mockPubsub.comms).thenReturn(mockComms);
           when(mockPubsub.tracer).thenReturn(mockTracer);
           when(mockPubsub.getTopics()).thenReturn([testTopicName]);
-          when(mockPubsub.refreshScores()).thenAnswer((_) => {});
           when(mockTracer.trace(any)).thenAnswer((_) => {});
           
           testRouter.attach(mockPubsub);
@@ -1518,33 +1685,33 @@ void main() {
           final mockMeshPeer1 = MockPeerId(); // Score: 10 (High)
           when(mockMeshPeer1.toBytes()).thenReturn(Uint8List.fromList([80,1,1]));
           when(mockMeshPeer1.toBase58()).thenReturn('QmMeshPrune1');
-          when(mockPubsub.getPeerScore(mockMeshPeer1)).thenReturn(10.0);
+          setScore(testRouter, mockMeshPeer1, 10.0);
 
           final mockMeshPeer2 = MockPeerId(); // Score: 1 (Low) - Should be pruned
           when(mockMeshPeer2.toBytes()).thenReturn(Uint8List.fromList([80,1,2]));
           when(mockMeshPeer2.toBase58()).thenReturn('QmMeshPrune2');
-          when(mockPubsub.getPeerScore(mockMeshPeer2)).thenReturn(1.0);
+          setScore(testRouter, mockMeshPeer2, 1.0);
 
           final mockMeshPeer3 = MockPeerId(); // Score: 8 (Medium)
           when(mockMeshPeer3.toBytes()).thenReturn(Uint8List.fromList([80,1,3]));
           when(mockMeshPeer3.toBase58()).thenReturn('QmMeshPrune3');
-          when(mockPubsub.getPeerScore(mockMeshPeer3)).thenReturn(8.0);
+          setScore(testRouter, mockMeshPeer3, 8.0);
           
           final mockMeshPeer4 = MockPeerId(); // Score: 2 (Low) - Should be pruned
           when(mockMeshPeer4.toBytes()).thenReturn(Uint8List.fromList([80,1,4]));
           when(mockMeshPeer4.toBase58()).thenReturn('QmMeshPrune4');
-          when(mockPubsub.getPeerScore(mockMeshPeer4)).thenReturn(2.0);
+          setScore(testRouter, mockMeshPeer4, 2.0);
 
           final mockMeshPeer5 = MockPeerId(); // Score: 9 (High)
           when(mockMeshPeer5.toBytes()).thenReturn(Uint8List.fromList([80,1,5]));
           when(mockMeshPeer5.toBase58()).thenReturn('QmMeshPrune5');
-          when(mockPubsub.getPeerScore(mockMeshPeer5)).thenReturn(9.0);
+          setScore(testRouter, mockMeshPeer5, 9.0);
 
           final initialMeshPeers = {mockMeshPeer1, mockMeshPeer2, mockMeshPeer3, mockMeshPeer4, mockMeshPeer5};
-          testRouter.mesh[testTopicName]!.addAll(initialMeshPeers);
-          expect(testRouter.mesh[testTopicName]!.length, 5); // Above DHigh (3)
-
           when(mockNetwork.peers).thenReturn(List<PeerId>.from(initialMeshPeers)..add(mockLocalPeerId));
+          // Subscribed, so that they are PX candidates.
+          subscribePeers(async, testRouter, initialMeshPeers.toList(), mesh: {...initialMeshPeers});
+          expect(testRouter.mesh[testTopicName]!.length, 5); // Above DHigh (3)
 
           // Capture PRUNE RPCs
           final List<PeerId> prunedPeers = [];
@@ -1566,8 +1733,7 @@ void main() {
           expect(prunedPeers.length, equals(3), 
             reason: "Should attempt to PRUNE (current - D) peers. Pruned: ${prunedPeers.map((p)=>p.toBase58()).toList()}");
           
-          // Peers with scores 1, 2 should be pruned. The third one will be one of the higher scores.
-          // The sort is ascending, so lowest scores are taken first.
+          // The DScore (2) best peers are kept; the others are pruned.
           // Scores: P2(1), P4(2), P3(8), P5(9), P1(10)
           // Expected to prune: P2, P4, P3
           expect(prunedPeers, containsAll([mockMeshPeer2, mockMeshPeer4, mockMeshPeer3]));
@@ -1601,108 +1767,101 @@ void main() {
         });
       });
 
-      test('heartbeat performs opportunistic grafting if mesh < DHigh and good score peers exist', () {
+      /// Runs one heartbeat of a router with scoring, joined to the test
+      /// topic, whose mesh is [meshScores] and whose other subscribed peers
+      /// are [otherScores] (by name, with their scores). Returns the RPCs
+      /// sent, by peer name, and the mesh after the heartbeat.
+      (Map<String, List<pb.RPC>>, Set<String>) runHeartbeat(
+        FakeAsync async,
+        GossipSubParams params, {
+        required Map<String, double> meshScores,
+        Map<String, double> otherScores = const {},
+        PeerScoreThresholds thresholds = _testThresholds,
+      }) {
+        router.stop();
+        final testRouter = scoredRouter(params, thresholds: thresholds);
+        testRouter.attach(mockPubsub);
+        testRouter.join(testTopic);
+
+        final peers = <String, PeerId>{};
+        var id = 0;
+        for (final entry in {...meshScores, ...otherScores}.entries) {
+          final peer = MockPeerId();
+          when(peer.toBytes()).thenReturn(Uint8List.fromList([0x00, 0x01, 0xa0 + id++]));
+          when(peer.toBase58()).thenReturn('Qm${entry.key}');
+          peers[entry.key] = peer;
+          setScore(testRouter, peer, entry.value);
+        }
+        when(mockNetwork.peers).thenReturn(peers.values.toList());
+        subscribePeers(async, testRouter, peers.values.toList(),
+            mesh: {for (final name in meshScores.keys) peers[name]!});
+
+        final names = {for (final e in peers.entries) e.value: e.key};
+        final sent = <String, List<pb.RPC>>{};
+        when(mockComms.sendRpc(any, any, any)).thenAnswer((inv) async {
+          sent.putIfAbsent(names[inv.positionalArguments[0]]!, () => []).add(inv.positionalArguments[1] as pb.RPC);
+        });
+
+        testRouter.start();
+        async.elapse(params.heartbeatInitialDelay);
+        async.flushMicrotasks();
+        testRouter.stop();
+        return (sent, {for (final p in testRouter.mesh[testTopicName]!) names[p]!});
+      }
+
+      test('heartbeat prunes the mesh peers with a negative score, without PX', () {
         fakeAsync((async) {
-          router.stop();
-          final testRouterParams = GossipSubParams(
-            D: 3, DLow: 2, DHigh: 4, // Mesh target 3, DHigh 4
-            opportunisticGraftScoreThreshold: 5.0,
-            opportunisticGraftTicks: 1, // Opportunistic grafting on every heartbeat
-            fanoutTTL: Duration(seconds: 1)
-          );
-          final testRouter = GossipSubRouter(params: testRouterParams);
+          final (sent, mesh) = runHeartbeat(async, GossipSubParams(D: 2, DLow: 1, DHigh: 3, DScore: 1, DOut: 0),
+              meshScores: {'Good': 1, 'Bad': -1});
 
-          clearInteractions(mockPubsub);
-          clearInteractions(mockComms);
-          clearInteractions(mockTracer);
-          clearInteractions(mockNetwork);
+          expect(mesh, equals({'Good'}));
+          final prune = sent['Bad']!.single.control.prune.single;
+          expect(prune.topicID, equals(testTopicName));
+          expect(prune.peers, isEmpty, reason: 'no PX to a peer pruned for its negative score');
+          expect(sent, isNot(contains('Good')));
+        });
+      });
 
-          when(mockPubsub.host).thenReturn(mockHost);
-          when(mockHost.id).thenReturn(mockLocalPeerId);
-          when(mockHost.network).thenReturn(mockNetwork);
-          when(mockPubsub.comms).thenReturn(mockComms);
-          when(mockPubsub.tracer).thenReturn(mockTracer);
-          when(mockPubsub.getTopics()).thenReturn([testTopicName]);
-          when(mockPubsub.refreshScores()).thenAnswer((_) => {});
-          when(mockTracer.trace(any)).thenAnswer((_) => {});
-          
-          testRouter.attach(mockPubsub);
-          testRouter.join(testTopic);
+      // As go-libp2p-pubsub's heartbeat: opportunistic grafting runs only
+      // when the median score of the mesh is below the threshold, and GRAFTs
+      // at most opportunisticGraftPeers peers scoring above that median.
+      final opportunisticParams = GossipSubParams(
+        D: 3, DLow: 2, DHigh: 4, DScore: 2, DOut: 0, // Mesh target 3, DHigh 4
+        opportunisticGraftTicks: 1, // Opportunistic grafting on every heartbeat
+        opportunisticGraftPeers: 2,
+      );
+      const opportunisticThresholds = PeerScoreThresholds(
+          gossipThreshold: -10, publishThreshold: -50, graylistThreshold: -80, opportunisticGraftThreshold: 5);
 
-          // Setup: Mesh has 2 peers (current DLow, but < DHigh)
-          final mockExistingMeshPeer1 = MockPeerId();
-          when(mockExistingMeshPeer1.toBytes()).thenReturn(Uint8List.fromList([90,1,1]));
-          when(mockExistingMeshPeer1.toBase58()).thenReturn('QmExistingMesh1');
-          when(mockPubsub.getPeerScore(mockExistingMeshPeer1)).thenReturn(3.0); // In mesh, score doesn't matter for this part
+      test('heartbeat grafts opportunistically when the mesh median score is below the threshold', () {
+        fakeAsync((async) {
+          // The mesh has DLow peers, so the DLow maintenance does not GRAFT.
+          final (sent, mesh) = runHeartbeat(async, opportunisticParams,
+              thresholds: opportunisticThresholds,
+              meshScores: {'Mesh1': 3, 'Mesh2': 3},
+              otherScores: {'Good1': 6, 'Good2': 7, 'Good3': 8, 'Low': 2});
 
-          final mockExistingMeshPeer2 = MockPeerId();
-          when(mockExistingMeshPeer2.toBytes()).thenReturn(Uint8List.fromList([90,1,2]));
-          when(mockExistingMeshPeer2.toBase58()).thenReturn('QmExistingMesh2');
-          when(mockPubsub.getPeerScore(mockExistingMeshPeer2)).thenReturn(3.0);
-          
-          testRouter.mesh[testTopicName]!.addAll([mockExistingMeshPeer1, mockExistingMeshPeer2]);
-          expect(testRouter.mesh[testTopicName]!.length, 2); // Below DHigh (4)
+          // Two of the three peers above the median (3) are grafted; not the
+          // peer below it.
+          final grafted = sent.keys.toSet();
+          expect(grafted, hasLength(opportunisticParams.opportunisticGraftPeers));
+          expect(grafted.difference({'Good1', 'Good2', 'Good3'}), isEmpty);
+          for (final name in grafted) {
+            expect(sent[name]!.single.control.graft.single.topicID, equals(testTopicName));
+          }
+          expect(mesh, equals({'Mesh1', 'Mesh2', ...grafted}));
+        });
+      });
 
-          // Candidate peers for opportunistic grafting
-          final mockOppGraftPeer1 = MockPeerId(); // Good score
-          when(mockOppGraftPeer1.toBytes()).thenReturn(Uint8List.fromList([91,1,1]));
-          when(mockOppGraftPeer1.toBase58()).thenReturn('QmOppGraft1');
-          when(mockPubsub.getPeerScore(mockOppGraftPeer1)).thenReturn(6.0); // Above threshold
+      test('heartbeat does not graft opportunistically when the mesh median score is at the threshold', () {
+        fakeAsync((async) {
+          final (sent, mesh) = runHeartbeat(async, opportunisticParams,
+              thresholds: opportunisticThresholds,
+              meshScores: {'Mesh1': 1, 'Mesh2': 5, 'Mesh3': 6},
+              otherScores: {'Good': 10});
 
-          final mockOppGraftPeer2 = MockPeerId(); // Bad score
-          when(mockOppGraftPeer2.toBytes()).thenReturn(Uint8List.fromList([91,1,2]));
-          when(mockOppGraftPeer2.toBase58()).thenReturn('QmOppGraft2');
-          when(mockPubsub.getPeerScore(mockOppGraftPeer2)).thenReturn(2.0); // Below threshold
-          
-          final mockOppGraftPeer3 = MockPeerId(); // Good score, already in mesh (should be ignored by opp. graft)
-          when(mockOppGraftPeer3.toBytes()).thenReturn(mockExistingMeshPeer1.toBytes()); // Same as existing
-          when(mockOppGraftPeer3.toBase58()).thenReturn(mockExistingMeshPeer1.toBase58());
-          when(mockPubsub.getPeerScore(mockOppGraftPeer3)).thenReturn(7.0);
-
-
-          final mockUnsubscribedPeer = MockPeerId(); // Good score, not subscribed to the topic
-          when(mockUnsubscribedPeer.toBytes()).thenReturn(Uint8List.fromList([91,1,3]));
-          when(mockUnsubscribedPeer.toBase58()).thenReturn('QmUnsubscribed');
-          when(mockPubsub.getPeerScore(mockUnsubscribedPeer)).thenReturn(9.0);
-
-          when(mockNetwork.peers).thenReturn([
-            mockLocalPeerId, 
-            mockExistingMeshPeer1, 
-            mockExistingMeshPeer2,
-            mockOppGraftPeer1,
-            mockOppGraftPeer2,
-            mockUnsubscribedPeer,
-            // mockOppGraftPeer3 is essentially mockExistingMeshPeer1
-          ]);
-          subscribePeers(async, testRouter,
-              [mockExistingMeshPeer1, mockExistingMeshPeer2, mockOppGraftPeer1, mockOppGraftPeer2],
-              mesh: {mockExistingMeshPeer1, mockExistingMeshPeer2});
-
-          final List<PeerId> opportunisticallyGraftedPeers = [];
-          when(mockComms.sendRpc(captureAny, argThat(isA<pb.RPC>()
-            .having((rpc) => rpc.hasControl() && rpc.control.graft.isNotEmpty && rpc.control.graft.first.topicID == testTopicName, 'isGraftForTopic', true)), 
-            gossipSubIDv11
-          )).thenAnswer((inv) async {
-            opportunisticallyGraftedPeers.add(inv.positionalArguments[0] as PeerId);
-          });
-
-          testRouter.start();
-          async.elapse(testRouterParams.fanoutTTL);
-
-          // Expect mockOppGraftPeer1 to be opportunistically grafted.
-          // Mesh maintenance for DLow might also run, but opportunistic grafting is checked first.
-          // If DLow maintenance also grafts, ensure we distinguish or account for it.
-          // Here, DLow is 2, current mesh is 2. So DLow maintenance shouldn't graft.
-          // D is 3. DHigh is 4. Mesh can grow up to 4.
-          expect(opportunisticallyGraftedPeers.length, equals(1), 
-            reason: "Should opportunistically GRAFT 1 peer. Grafted: ${opportunisticallyGraftedPeers.map((p)=>p.toBase58())}");
-          expect(opportunisticallyGraftedPeers, contains(mockOppGraftPeer1));
-          
-          // Verify mesh state
-          expect(testRouter.mesh[testTopicName]!.length, equals(3)); // 2 existing + 1 opp graft
-          expect(testRouter.mesh[testTopicName], containsAll([mockExistingMeshPeer1, mockExistingMeshPeer2, mockOppGraftPeer1]));
-
-          testRouter.stop();
+          expect(sent, isEmpty);
+          expect(mesh, equals({'Mesh1', 'Mesh2', 'Mesh3'}));
         });
       });
 
@@ -1715,10 +1874,9 @@ void main() {
         /// Sets up a router joined to the test topic with [peer] in its mesh.
         void setUpRouter(FakeAsync async) {
           router.stop();
-          testRouter = GossipSubRouter(params: GossipSubParams());
+          testRouter = scoredRouter(GossipSubParams());
           clearInteractions(mockPubsub);
           when(mockPubsub.getTopics()).thenReturn([testTopicName]);
-          when(mockPubsub.getPeerScoreObject(any)).thenReturn(null);
           peer = MockPeerId();
           when(peer.toBytes()).thenReturn(Uint8List.fromList([0x00, 0x01, 0x70]));
           when(peer.toBase58()).thenReturn('QmBackoffPeer');
@@ -1732,6 +1890,7 @@ void main() {
           });
 
           testRouter.attach(mockPubsub);
+          setScore(testRouter, peer, 0);
           subscribePeers(async, testRouter, [peer]);
           testRouter.join(testTopic);
           async.flushMicrotasks();
@@ -1751,12 +1910,16 @@ void main() {
         }
 
         /// Checks that the heartbeat GRAFTs [peer] again only after [backoff].
+        /// As go-libp2p-pubsub's clearBackoff, the backoff holds until it is
+        /// cleared, 2 heartbeats after it ends, by the clearing that runs
+        /// every 15 heartbeats.
         void expectNoGraftFor(FakeAsync async, Duration backoff) {
+          final interval = testRouter.params.heartbeatInterval;
           testRouter.start();
-          async.elapse(backoff - const Duration(seconds: 1));
+          async.elapse(backoff + interval * 2);
           async.flushMicrotasks();
           expect(grafted, isEmpty, reason: 'GRAFT during the backoff');
-          async.elapse(const Duration(seconds: 2));
+          async.elapse(interval * 15);
           async.flushMicrotasks();
           expect(grafted, equals([peer]), reason: 'GRAFT after the backoff');
           testRouter.stop();
@@ -1782,8 +1945,7 @@ void main() {
         test('a GRAFT during the backoff is answered with PRUNE and penalised', () {
           fakeAsync((async) {
             setUpRouter(async);
-            final peerScore = PeerScore(peer, PeerScoreParams.defaultParams);
-            when(mockPubsub.getPeerScoreObject(peer)).thenReturn(peerScore);
+            double behaviourPenalty() => testRouter.score!.snapshot(peer)!.behaviourPenalty;
             final graft = pb.ControlMessage()..graft.add(pb.ControlGraft()..topicID = testTopicName);
             receive(async, prune(backoffSeconds: 60));
 
@@ -1791,15 +1953,16 @@ void main() {
             async.elapse(const Duration(seconds: 1));
             receive(async, graft);
             expect(testRouter.mesh[testTopicName], isEmpty);
-            expect(peerScore.behaviourPenalty, equals(2));
+            expect(behaviourPenalty(), equals(2));
             expect(prunesSent.single.topicID, equals(testTopicName));
+            expect(prunesSent.single.peers, isEmpty, reason: 'no PX to a peer that GRAFTs during its backoff');
             expect(prunesSent.single.backoff.toInt(), equals(testRouter.params.pruneBackoff.inSeconds));
 
             // Later in the (renewed) backoff: penalised once.
             async.elapse(const Duration(seconds: 20));
             receive(async, graft);
             expect(testRouter.mesh[testTopicName], isEmpty);
-            expect(peerScore.behaviourPenalty, equals(3));
+            expect(behaviourPenalty(), equals(3));
             expect(prunesSent, hasLength(2));
           });
         });
@@ -1845,7 +2008,6 @@ void main() {
           final testRouter = GossipSubRouter(params: GossipSubParams());
           clearInteractions(mockComms);
           when(mockPubsub.getTopics()).thenReturn([testTopicName]);
-          when(mockPubsub.getPeerScoreObject(any)).thenReturn(null);
 
           final grafted = <PeerId>[];
           when(mockComms.sendRpc(any, any, any)).thenAnswer((inv) async {
@@ -1896,9 +2058,7 @@ void main() {
           when(mockPubsub.comms).thenReturn(mockComms);
           when(mockPubsub.tracer).thenReturn(mockTracer);
           when(mockPubsub.getTopics()).thenReturn([]); // Not subscribed to any topic
-          when(mockPubsub.refreshScores()).thenAnswer((_) => {});
           when(mockTracer.trace(any)).thenAnswer((_) => {});
-          when(mockPubsub.getPeerScore(any)).thenReturn(0.0); // Default good score
 
           testRouter.attach(mockPubsub);
 
@@ -1927,9 +2087,9 @@ void main() {
         fakeAsync((async) {
           router.stop();
           final testRouterParams = GossipSubParams(
-            D: 3, fanoutTTL: Duration(seconds: 1) // D=3 for fanout, short TTL for test
+            D: 3, DLow: 3, DScore: 3, DOut: 0, fanoutTTL: Duration(seconds: 1) // D=3 for fanout, short TTL for test
           );
-          final testRouter = GossipSubRouter(params: testRouterParams);
+          final testRouter = scoredRouter(testRouterParams);
 
           clearInteractions(mockPubsub);
           clearInteractions(mockComms);
@@ -1942,7 +2102,6 @@ void main() {
           when(mockPubsub.comms).thenReturn(mockComms);
           when(mockPubsub.tracer).thenReturn(mockTracer);
           when(mockPubsub.getTopics()).thenReturn([]); // Not subscribed
-          when(mockPubsub.refreshScores()).thenAnswer((_) => {});
           when(mockTracer.trace(any)).thenAnswer((_) => {});
           
           testRouter.attach(mockPubsub);
@@ -1951,7 +2110,7 @@ void main() {
           final mockExistingFanoutPeer = MockPeerId();
           when(mockExistingFanoutPeer.toBytes()).thenReturn(Uint8List.fromList([101,1,1]));
           when(mockExistingFanoutPeer.toBase58()).thenReturn('QmExistingFanout');
-          when(mockPubsub.getPeerScore(mockExistingFanoutPeer)).thenReturn(5.0);
+          setScore(testRouter, mockExistingFanoutPeer, 5.0);
 
           testRouter.fanout[fanoutFillTopic] = {mockExistingFanoutPeer}; // 1 peer, D=3, need 2 more
           testRouter.fanoutLastPublished[fanoutFillTopic] = DateTime.now(); // Not expired
@@ -1960,22 +2119,23 @@ void main() {
           final mockCandidateFanout1 = MockPeerId();
           when(mockCandidateFanout1.toBytes()).thenReturn(Uint8List.fromList([102,1,1]));
           when(mockCandidateFanout1.toBase58()).thenReturn('QmCandFanout1');
-          when(mockPubsub.getPeerScore(mockCandidateFanout1)).thenReturn(6.0);
+          setScore(testRouter, mockCandidateFanout1, 6.0);
 
           final mockCandidateFanout2 = MockPeerId();
           when(mockCandidateFanout2.toBytes()).thenReturn(Uint8List.fromList([102,1,2]));
           when(mockCandidateFanout2.toBase58()).thenReturn('QmCandFanout2');
-          when(mockPubsub.getPeerScore(mockCandidateFanout2)).thenReturn(7.0);
+          setScore(testRouter, mockCandidateFanout2, 7.0);
           
           final mockCandidateFanout3BadScore = MockPeerId();
           when(mockCandidateFanout3BadScore.toBytes()).thenReturn(Uint8List.fromList([102,1,3]));
           when(mockCandidateFanout3BadScore.toBase58()).thenReturn('QmCandFanout3Bad');
-          when(mockPubsub.getPeerScore(mockCandidateFanout3BadScore)).thenReturn(-1.0); // Bad score
+          // Below the publish threshold
+          setScore(testRouter, mockCandidateFanout3BadScore, _testThresholds.publishThreshold - 1);
 
           final mockUnsubscribedPeer = MockPeerId(); // Good score, not subscribed to the topic
           when(mockUnsubscribedPeer.toBytes()).thenReturn(Uint8List.fromList([102,1,4]));
           when(mockUnsubscribedPeer.toBase58()).thenReturn('QmUnsubscribed');
-          when(mockPubsub.getPeerScore(mockUnsubscribedPeer)).thenReturn(9.0);
+          setScore(testRouter, mockUnsubscribedPeer, 9.0);
 
           when(mockNetwork.peers).thenReturn([
             mockLocalPeerId,
@@ -2003,6 +2163,256 @@ void main() {
           expect(testRouter.fanout[fanoutFillTopic], isNot(contains(mockUnsubscribedPeer)));
 
           testRouter.stop();
+        });
+      });
+    });
+
+    group('Gossip (IHAVE/IWANT), as go-libp2p-pubsub', () {
+      const testTopicName = 'gossip-topic';
+      final testTopic = Topic(testTopicName);
+      late GossipSubRouter r;
+
+      Map<PeerId, List<pb.RPC>> captureSentRpcs() {
+        final captured = <PeerId, List<pb.RPC>>{};
+        when(mockComms.sendRpc(any, any, any)).thenAnswer((inv) async {
+          captured.putIfAbsent(inv.positionalArguments[0] as PeerId, () => []).add(inv.positionalArguments[1] as pb.RPC);
+        });
+        return captured;
+      }
+
+      late Map<PeerId, List<pb.RPC>> sent;
+      var nextId = 0;
+
+      MockPeerId peer() {
+        final p = MockPeerId();
+        final id = 0x40 + nextId++;
+        when(p.toBytes()).thenReturn(Uint8List.fromList([0x00, 0x01, id]));
+        when(p.toBase58()).thenReturn('QmGossip$id');
+        return p;
+      }
+
+      pb.Message message(int n) => pb.Message()
+        ..from = [0x00, 0x01, 0x01]
+        ..seqno = [n]
+        ..topic = testTopicName
+        ..data = [n];
+
+      pb.RPC ihave(List<pb.Message> msgs) => pb.RPC()
+        ..control = (pb.ControlMessage()
+          ..ihave.add(pb.ControlIHave()
+            ..topicID = testTopicName
+            ..messageIDs.addAll(msgs.map((m) => messageIdToBytes(defaultMessageIdFn(m))))));
+
+      List<String> iwantIds(PeerId p) => [
+            for (final rpc in sent[p] ?? const <pb.RPC>[])
+              for (final iwant in rpc.control.iwant) ...iwant.messageIDs.map(messageIdFromBytes),
+          ];
+
+      /// A router (not started) that has joined the test topic, with [peers]
+      /// connected and subscribed.
+      void setUpRouter(FakeAsync async, GossipSubParams params, List<PeerId> peers) {
+        router.stop();
+        r = scoredRouter(params);
+        r.attach(mockPubsub);
+        r.join(testTopic);
+        when(mockNetwork.peers).thenReturn(peers);
+        for (final p in peers) {
+          setScore(r, p, 0);
+          r.handleRpc(p, pb.RPC()..subscriptions.add(pb.RPC_SubOpts()..subscribe = true..topicid = testTopicName));
+        }
+        when(mockPubsub.validateMessage(any, markSeen: anyNamed('markSeen')))
+            .thenAnswer((inv) => _validated(inv, ValidationResult.accept));
+        async.flushMicrotasks();
+        sent = captureSentRpcs();
+      }
+
+      /// Connects and subscribes [peers] to the router made by [setUpRouter].
+      void setUpRouter2(FakeAsync async, List<PeerId> peers) {
+        when(mockNetwork.peers).thenReturn(peers);
+        for (final p in peers) {
+          setScore(r, p, 0);
+          r.handleRpc(p, pb.RPC()..subscriptions.add(pb.RPC_SubOpts()..subscribe = true..topicid = testTopicName));
+        }
+        async.flushMicrotasks();
+        sent.clear();
+      }
+
+      void heartbeat(FakeAsync async, GossipSubParams params) {
+        r.start();
+        async.elapse(params.heartbeatInitialDelay);
+        async.flushMicrotasks();
+        r.stop();
+      }
+
+      test('the heartbeat gossips recent message IDs to DLazy topic peers outside the mesh', () {
+        fakeAsync((async) {
+          final params = GossipSubParams(D: 2, DLow: 1, DHigh: 3, DScore: 1, DOut: 0, DLazy: 2);
+          final meshPeer = peer();
+          final others = [peer(), peer(), peer()];
+          setUpRouter(async, params, [meshPeer, ...others]);
+          r.mesh[testTopicName] = {meshPeer};
+          final msg = message(1);
+          r.handleRpc(meshPeer, pb.RPC()..publish.add(msg));
+          async.flushMicrotasks();
+          sent.clear();
+
+          heartbeat(async, params);
+
+          final gossiped = [
+            for (final p in others)
+              if (sent[p]?.any((rpc) => rpc.control.ihave.isNotEmpty) ?? false) p,
+          ];
+          expect(gossiped, hasLength(2), reason: 'DLazy = 2 > gossipFactor * 3 peers');
+          for (final p in gossiped) {
+            final ids = sent[p]!.expand((rpc) => rpc.control.ihave).expand((i) => i.messageIDs);
+            expect(ids.map(messageIdFromBytes), [defaultMessageIdFn(msg)]);
+          }
+          expect(sent[meshPeer]?.any((rpc) => rpc.control.ihave.isNotEmpty) ?? false, isFalse);
+        });
+      });
+
+      test('at most maxIHaveMessages IHAVEs of a peer are answered per heartbeat', () {
+        fakeAsync((async) {
+          final params = GossipSubParams(maxIHaveMessages: 2);
+          final p = peer();
+          setUpRouter(async, params, [p]);
+          for (var i = 0; i < 4; i++) {
+            r.handleRpc(p, ihave([message(i)]));
+          }
+          async.flushMicrotasks();
+          expect(iwantIds(p), hasLength(2));
+
+          // The next heartbeat resets the counter.
+          heartbeat(async, params);
+          sent.clear();
+          r.handleRpc(p, ihave([message(9)]));
+          async.flushMicrotasks();
+          expect(iwantIds(p), hasLength(1));
+        });
+      });
+
+      test('at most maxIHaveLength messages are requested from a peer per heartbeat', () {
+        fakeAsync((async) {
+          final params = GossipSubParams(maxIHaveLength: 3);
+          final p = peer();
+          setUpRouter(async, params, [p]);
+          r.handleRpc(p, ihave([for (var i = 0; i < 5; i++) message(i)]));
+          r.handleRpc(p, ihave([message(7)]));
+          async.flushMicrotasks();
+          expect(iwantIds(p), hasLength(3));
+        });
+      });
+
+      test('a peer that does not deliver a requested message is penalised; one that does is not', () {
+        fakeAsync((async) {
+          final params = GossipSubParams();
+          final liar = peer();
+          final honest = peer();
+          setUpRouter(async, params, [liar, honest]);
+
+          r.handleRpc(liar, ihave([message(1)]));
+          final delivered = message(2);
+          r.handleRpc(honest, ihave([delivered]));
+          async.flushMicrotasks();
+          expect(iwantIds(liar), hasLength(1));
+          expect(iwantIds(honest), hasLength(1));
+          r.handleRpc(honest, pb.RPC()..publish.add(delivered));
+          async.flushMicrotasks();
+
+          async.elapse(params.iwantFollowupTime + const Duration(milliseconds: 1));
+          heartbeat(async, params);
+
+          expect(r.score!.snapshot(liar)!.behaviourPenalty, 1);
+          expect(r.score!.snapshot(honest)!.behaviourPenalty, 0);
+        });
+      });
+
+      test('a large received message is announced with IDONTWANT to v1.2 mesh peers only', () {
+        fakeAsync((async) {
+          final params = GossipSubParams(D: 2, DLow: 1, DHigh: 3, DScore: 1, DOut: 0, idontwantMessageThreshold: 10);
+          final source = peer();
+          final v12 = peer();
+          final v11 = peer();
+          setUpRouter(async, params, []);
+          r.addPeer(v12, gossipSubIDv12);
+          setUpRouter2(async, [source, v12, v11]);
+          r.mesh[testTopicName] = {source, v12, v11};
+          final big = message(1)..data = List.filled(10, 7);
+          r.handleRpc(source, pb.RPC()..publish.add(big));
+          async.flushMicrotasks();
+
+          List<String> idontwant(PeerId p) => [
+                for (final rpc in sent[p] ?? const <pb.RPC>[])
+                  for (final i in rpc.control.idontwant) ...i.messageIDs.map(messageIdFromBytes),
+              ];
+          expect(idontwant(v12), [defaultMessageIdFn(big)]);
+          expect(idontwant(v11), isEmpty);
+          expect(idontwant(source), isEmpty);
+        });
+      });
+
+      test('a message a mesh peer said it does not want is not forwarded to it', () {
+        fakeAsync((async) {
+          final params = GossipSubParams(D: 2, DLow: 1, DHigh: 3, DScore: 1, DOut: 0);
+          final source = peer();
+          final other = peer();
+          setUpRouter(async, params, [source, other]);
+          r.mesh[testTopicName] = {source, other};
+          final msg = message(3);
+          r.handleRpc(
+              other,
+              pb.RPC()
+                ..control = (pb.ControlMessage()
+                  ..idontwant.add(pb.ControlIDontWant()..messageIDs.add(messageIdToBytes(defaultMessageIdFn(msg))))));
+          r.handleRpc(source, pb.RPC()..publish.add(msg));
+          async.flushMicrotasks();
+          expect(sent[other]?.expand((rpc) => rpc.publish) ?? const [], isEmpty);
+
+          // Forgotten after idontwantMessageTTL heartbeats.
+          for (var i = 0; i < params.idontwantMessageTTL; i++) {
+            heartbeat(async, params);
+          }
+          sent.clear();
+          r.handleRpc(source, pb.RPC()..publish.add(message(4)));
+          async.flushMicrotasks();
+          expect(sent[other]!.expand((rpc) => rpc.publish), hasLength(1));
+        });
+      });
+
+      test('a PRUNE to a v1.0 peer has no backoff and no PX', () {
+        fakeAsync((async) {
+          final params = GossipSubParams();
+          final v10 = peer();
+          setUpRouter(async, params, []);
+          r.addPeer(v10, gossipSubIDv10);
+          setUpRouter2(async, [v10]);
+          r.mesh[testTopicName] = {v10};
+          r.leave(testTopic);
+          async.flushMicrotasks();
+          final prune = sent[v10]!.single.control.prune.single;
+          expect(prune.hasBackoff(), isFalse);
+          expect(prune.peers, isEmpty);
+        });
+      });
+
+      test('a peer below the graylist threshold has its RPCs refused', () {
+        fakeAsync((async) {
+          final p = peer();
+          setUpRouter(async, GossipSubParams(), [p]);
+          expect(r.acceptFrom(p), AcceptStatus.all);
+          setScore(r, p, -81); // Below graylistThreshold -80.
+          expect(r.acceptFrom(p), AcceptStatus.none);
+        });
+      });
+
+      test('IHAVEs from a peer below the gossip threshold are ignored', () {
+        fakeAsync((async) {
+          final p = peer();
+          setUpRouter(async, GossipSubParams(), [p]);
+          setScore(r, p, -20); // Below gossipThreshold -10.
+          r.handleRpc(p, ihave([message(1)]));
+          async.flushMicrotasks();
+          expect(iwantIds(p), isEmpty);
         });
       });
     });

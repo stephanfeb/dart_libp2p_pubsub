@@ -2,6 +2,48 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased (breaking: 2.0.0)
+
+A review against go-libp2p-pubsub v0.15.0 found remote denial-of-service holes, a crash, interop bugs and a peer-scoring model that did not work. This release fixes them and aligns the router with Go.
+
+### Security
+- **A failed stream open crashed the process.** A peer that connected without speaking pubsub made the per-peer stream lock complete with an error nobody listened to, which terminated the isolate. It no longer does.
+- **Inbound RPC size was unbounded.** A peer could announce a huge frame and make the node buffer it. Frames above `maxMessageSize` (default 1 MiB, `PubSub(maxMessageSize:)`) now reset the stream before being read. Outgoing RPCs are split to fit (as Go's `RPC.split`), and an oversized message is dropped.
+- **IWANT replies could be amplified.** Requested IDs were not de-duplicated and could be requested without limit. Each message is now sent once per IWANT, at most `gossipRetransmission` (3) times per peer, and only to peers above the gossip threshold.
+- **A PRUNE with a huge backoff aborted RPC handling.** Backoffs are now capped to `maxPruneBackoff` (24 h).
+- **Messages were marked seen before their signature was checked**, so a forged copy blocked the genuine message and got honest forwarders penalised. As in Go, a message is marked seen once its signature is verified, and messages failing signature checks are not tracked.
+- **IHAVE handling had no limits.** `maxIHaveMessages`, `maxIHaveLength` and IWANT promises (a peer that does not deliver an advertised message is penalised) now apply, and IHAVEs for topics not joined are ignored.
+- **Graylisted peers** (score below `graylistThreshold`) have their RPCs ignored (`Router.acceptFrom`).
+- **The outgoing RPC queue was unbounded** and could keep failed RPCs forever. It now holds 32 RPCs per peer with a priority lane, drops RPCs when full (traced as DROP_RPC; dropped GRAFT/PRUNEs are retried with the next RPC), and drops an RPC that fails to send.
+- **Concurrent writes could interleave frames** on a stream; writes are now serialised per stream.
+- A message that claims to come from this node but arrives from a peer is rejected.
+
+### Interop
+- **Message IDs now match Go.** The default ID is the bytes of `from` followed by `seqno` (Go's `DefaultMsgIdFn`), and `messageIDs` in IHAVE/IWANT/IDONTWANT are `bytes` (wire-compatible with Go's `string`). IDs are Dart strings with one byte per code unit (`messageIdFromBytes`, `messageIdToBytes`). `PubSub(messageIdFn:)` sets a custom ID function.
+- **Protocols.** GossipSub speaks `/meshsub/1.2.0`, `1.1.0`, `1.0.0` and `/floodsub/1.0.0` and negotiates one per peer (`Router.protocols`); features follow the protocol (PX from v1.1, IDONTWANT from v1.2). FloodSub peers get every message of their topics.
+- **IDONTWANT (v1.2)** is sent for large messages and honoured.
+- **Signature policies**: `PubSub(signaturePolicy:)` takes `strictSign` (default), `strictNoSign`, `laxSign` or `laxNoSign`, and `noAuthor` omits `from`/`seqno`, as Go's `WithMessageSignaturePolicy` and `WithNoAuthor`.
+- **Heartbeat gossip**: the heartbeat now emits IHAVE gossip for recent messages to `max(DLazy, gossipFactor * peers)` peers, so lost messages are repaired; IHAVE is no longer sent at publish time. The message cache keeps `historyLength` heartbeats and gossips the last `historyGossip`, as Go's.
+- **FloodSub and RandomSub** work: they register their protocols, keep a seen cache, validate messages, and skip the source and the author. RandomSub sends to `max(RandomSubD, sqrt(networkSize))` peers.
+
+### Peer scoring (breaking)
+- Scoring was rebuilt on go-libp2p-pubsub's `score.go`: decaying counters per peer and topic, a score computed on demand from P1–P7, delivery records, IP colocation and the behaviour penalty. Before, the score accumulated on each refresh and one penalty pinned a peer near -1000.
+- Scoring moved from `PubSub` to the router and is opt-in, as in Go: `GossipSubRouter(scoreParams:, scoreThresholds:)`, both required together. `PubSub` no longer has `scoreParams`, `getPeerScore`, `getPeerScoreObject`, `peerScores` or `refreshScores`; use `router.score`.
+- `PeerScoreParams`, `TopicScoreParams` and `PeerScoreThresholds` have Go's fields and `validate()` rules (`topics`, `topicScoreCap`, `appSpecificWeight`, `ipColocationFactorWeight`, `behaviourPenaltyThreshold`, `gossipThreshold`, `publishThreshold`, `graylistThreshold`, `acceptPXThreshold`, `opportunisticGraftThreshold`, ...). `scoreParameterDecay` is Go's `ScoreParameterDecay`.
+
+### Router (breaking)
+- The heartbeat follows Go: prunes mesh peers with a negative score, keeps `DOut` outbound peers, keeps the `DScore` best peers when pruning, grafts opportunistically only when the mesh median is below `opportunisticGraftThreshold`, filters fanout by `publishThreshold`, and keeps backoffs two heartbeats past their end.
+- GRAFTs from peers with a negative score, or from inbound peers when the mesh has `DHigh` peers, are refused with a PRUNE.
+- Flood publish is on by default (`floodPublish`), and forwarded messages skip their author.
+- Peer Exchange is off by default (`GossipSubRouter(doPX: true)`).
+- `GossipSubParams`: `DScore` is now a peer count (default 4), `DLow` defaults to 5, new `DOut`, `gossipFactor`, `historyLength`, `historyGossip`, `maxIHaveLength`, `maxIHaveMessages`, `iwantFollowupTime`, `opportunisticGraftPeers`, IDONTWANT parameters; `opportunisticGraftScoreThreshold` was removed; `prunePeers` defaults to 16. `validate()` uses Go's rules.
+- `Router` has `protocols` and `acceptFrom`; `PubSub` now calls `Router.addPeer` for each pubsub peer, sends its hello to every connected peer (including peers connected before `start()`), and announces subscription changes to peers being greeted.
+- Validation no longer blocks reading a peer's stream.
+
+### Also
+- The public library exports the routers, `Router`, `Topic`, the protocol IDs, the message ID helpers and the tracers.
+- README links point to `doc/`.
+
 ## 1.6.0 - 2026-10-08
 
 ### Fixed

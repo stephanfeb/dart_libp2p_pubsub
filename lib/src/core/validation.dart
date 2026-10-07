@@ -33,11 +33,21 @@ enum ValidationResult {
 
 /// Validates basic message structure and fields.
 /// Corresponds to parts of `validateRpcMessage` in Go.
+///
+/// With [requireAuthor] false, a message without `from` and `seqno` is
+/// accepted, as under go-libp2p-pubsub's StrictNoSign policy.
 ValidationResult validateMessageStructure(
   PubSubMessage message, {
   int maxMessageSize = defaultMaxMessageSize,
+  bool requireAuthor = true,
 }) {
   final rpcMsg = message.rpcMessage;
+  if (!requireAuthor) {
+    if (rpcMsg.topic.isEmpty || rpcMsg.data.length > maxMessageSize) {
+      return ValidationResult.reject;
+    }
+    return ValidationResult.accept;
+  }
 
   // Check: 'from' field (publisher PeerId raw bytes) must be present.
   // The PubSubMessage.from getter already attempts to parse it.

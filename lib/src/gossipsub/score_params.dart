@@ -1,199 +1,352 @@
-import 'package:dart_libp2p/core/peer/peer_id.dart'; // Needed for AppSpecificScore function type
+import 'dart:io' show InternetAddress;
+import 'dart:math' as math;
 
-/// Default [TopicScoreParams.invalidMessageDeliveriesWeight].
-const double defaultInvalidMessageDeliveriesWeight = -1.0;
+import 'package:dart_libp2p/core/peer/peer_id.dart';
 
-/// Default [TopicScoreParams.invalidMessageDeliveriesDecay]: the counter
-/// falls from 1 to below the default `decayToZero` (0.01) in about 1 hour
-/// with a 1 s decay interval (0.01^(1/3600) is about 0.99872).
-const double defaultInvalidMessageDeliveriesDecay = 0.9987;
+/// The default [PeerScoreParams.decayInterval] (go-libp2p-pubsub's
+/// `DefaultDecayInterval`).
+const Duration defaultDecayInterval = Duration(seconds: 1);
 
-/// Defines parameters for scoring within a specific topic.
-class TopicScoreParams {
-  /// Base weight for participating in the topic (P1 component).
-  final double topicWeight;
+/// The default [PeerScoreParams.decayToZero] (go-libp2p-pubsub's
+/// `DefaultDecayToZero`).
+const double defaultDecayToZero = 0.01;
 
-  /// Quantum for time in mesh calculation (P1 component).
-  final Duration timeInMeshQuantum;
-  /// Cap for score from time in mesh (P1 component).
-  final double timeInMeshCap;
-  /// Grace period after which the P1 cap is applied if no messages are seen.
-  final Duration topicWeightCapGracePeriod;
-
-  /// Weight for first message deliveries in this topic (P3a component).
-  final double firstMessageDeliveriesWeight;
-  /// Decay factor for first message deliveries score (P3a component).
-  final double firstMessageDeliveriesDecay;
-  /// Cap for score from first message deliveries (P3a component).
-  final double firstMessageDeliveriesCap;
-
-  /// Weight for mesh message deliveries in this topic (P2 component).
-  final double meshMessageDeliveriesWeight;
-  /// Decay factor for mesh message deliveries score (P2 component).
-  final double meshMessageDeliveriesDecay;
-  /// Threshold for activating mesh message deliveries score (P2 component).
-  final int meshMessageDeliveriesThreshold;
-  /// Cap for score from mesh message deliveries (P2 component).
-  final double meshMessageDeliveriesCap;
-  /// Activation window for mesh message deliveries (P2 component).
-  final Duration meshMessageDeliveriesActivationWindow;
-  /// Decay for the mesh message deliveries counter itself.
-  final double meshMessageDeliveriesWindowDecay;
-
-
-  /// Penalty for mesh message delivery failures in this topic (P2 penalty).
-  final double meshFailurePenaltyWeight;
-  /// Decay factor for mesh failure penalty (P2 penalty).
-  final double meshFailurePenaltyDecay;
-
-  /// Weight of the penalty for invalid messages in this topic (P3b). It must
-  /// be negative (or 0 to turn the penalty off). The penalty is
-  /// `weight * counter^2`, where the counter is the number of messages from
-  /// the peer that validation rejected, with decay.
-  ///
-  /// The default is [defaultInvalidMessageDeliveriesWeight] (-1.0): 1
-  /// rejected message gives -1, 2 give -4, 4 give -16, 10 give -100 (the
-  /// default `graylistThreshold`). Applications should tune this for their
-  /// traffic.
-  final double invalidMessageDeliveriesWeight;
-  /// Decay factor of the P3b counter, applied once per
-  /// [PeerScoreParams.decayInterval]. The default,
-  /// [defaultInvalidMessageDeliveriesDecay] (0.9987), takes the counter for
-  /// one message to zero in about 1 hour with the default 1 s decay
-  /// interval (as `ScoreParameterDecay(time.Hour)` in go-libp2p-pubsub).
-  final double invalidMessageDeliveriesDecay;
-
-  const TopicScoreParams({
-    this.topicWeight = 0.0,
-    this.timeInMeshQuantum = const Duration(seconds: 1),
-    this.timeInMeshCap = 3600.0, // e.g., 1 hour worth of quantum
-    this.topicWeightCapGracePeriod = const Duration(hours: 1),
-
-    this.firstMessageDeliveriesWeight = 0.0,
-    this.firstMessageDeliveriesDecay = 1.0, // No decay by default
-    this.firstMessageDeliveriesCap = 2000.0,
-
-    this.meshMessageDeliveriesWeight = 0.0,
-    this.meshMessageDeliveriesDecay = 1.0, // No decay by default
-    this.meshMessageDeliveriesThreshold = 0,
-    this.meshMessageDeliveriesCap = 100.0,
-    this.meshMessageDeliveriesActivationWindow = const Duration(minutes: 1),
-    this.meshMessageDeliveriesWindowDecay = 1.0, // No decay by default
-
-    this.meshFailurePenaltyWeight = 0.0,
-    this.meshFailurePenaltyDecay = 1.0, // No decay by default
-
-    this.invalidMessageDeliveriesWeight = defaultInvalidMessageDeliveriesWeight,
-    this.invalidMessageDeliveriesDecay = defaultInvalidMessageDeliveriesDecay,
-  });
-
-  static TopicScoreParams get defaultTopicParams => const TopicScoreParams();
+/// The decay factor that takes a counter from 1 to [decayToZero] in [decay],
+/// decaying once every [base] (go-libp2p-pubsub's
+/// `ScoreParameterDecayWithBase`).
+double scoreParameterDecay(Duration decay,
+    {Duration base = defaultDecayInterval, double decayToZero = defaultDecayToZero}) {
+  final ticks = decay.inMicroseconds / base.inMicroseconds;
+  return math.pow(decayToZero, 1 / ticks).toDouble();
 }
 
+bool _isInvalidNumber(double x) => x.isNaN || x.isInfinite;
 
-/// Defines the parameters that control the peer scoring mechanism in GossipSub.
-/// These parameters are based on the GossipSub v1.1 specification.
-class PeerScoreParams {
-  /// Default parameters for topics that don't have specific overrides.
-  final TopicScoreParams defaultTopicParams;
-  /// Specific parameter overrides for topics, keyed by topic string.
-  final Map<String, TopicScoreParams> topicParamsOverrides;
+/// The score thresholds of GossipSub, as go-libp2p-pubsub's
+/// `PeerScoreThresholds`.
+class PeerScoreThresholds {
+  /// Below this score, a peer gets no gossip from us, and its gossip (IHAVE
+  /// and IWANT) is ignored. Must be <= 0.
+  final double gossipThreshold;
 
-  // --- Global Parameters (not topic-specific) ---
-  /// Application-specific score function. (P7)
-  /// Allows the application to provide a custom score component.
-  /// The function takes a PeerId and returns a double score.
-  final double Function(PeerId peerId)? appSpecificScore;
+  /// Below this score, a peer gets none of our published messages (flood
+  /// publish and fanout). Must be <= [gossipThreshold].
+  final double publishThreshold;
 
-  /// IP colocation factor. (P5)
-  /// Multiplicative factor applied if a peer is IP-colocated and their topic score sum is positive.
-  /// Value should be <= 1.0 (e.g., 0.75 for a 25% penalty).
-  final double ipColocationFactor;
-  final int ipColocationFactorThreshold; // Min number of peers on IP to trigger penalty
-  final double ipColocationFactorWhitelist; // TODO: Implement IP whitelist functionality
-
-  /// Decay interval for the global score and some counters.
-  final Duration decayInterval;
-  /// General decay factor for the score per interval.
-  final double scoreDecay;
-  /// Decay-to-zero factor. Scores below this (in magnitude) are rounded to zero.
-  final double decayToZero;
-
-  /// Time to remember a message delivery in seconds (for P2, P3).
-  final Duration deliveryRecordTTL; // This might become topic-specific if P2/P3 decay is topic-specific
-
-  /// Score caps.
-  final double scoreMin; // Global score minimum
-  final double scoreMax; // Global score maximum (though often implicit through positive contributions)
-
-  /// Score threshold to be graylisted (blocked from propagation).
+  /// Below this score, the RPCs of a peer are ignored entirely. Must be <=
+  /// [publishThreshold].
   final double graylistThreshold;
-  /// Time for which a peer is graylisted if their score drops below GraylistThreshold.
-  final Duration graylistDuration;
 
-  /// Time window for opportunistic grafting.
-  final Duration opportunisticGraftThreshold; // Time since last graft to consider opportunistic
+  /// The Peer Exchange of a PRUNE is used only if its sender's score is at
+  /// least this. Must be >= 0.
+  final double acceptPXThreshold;
 
-  /// Global weight for behavioral penalties (P6).
-  final double behaviourPenaltyWeight;
-  /// Decay for behavioral penalties (P6).
-  final double behaviourPenaltyDecay;
-  /// Cap for behavioral penalties (P6).
-  final double behaviourPenaltyCap;
+  /// When the median score of a topic's mesh is below this, the heartbeat
+  /// opportunistically GRAFTs better peers. Must be >= 0.
+  final double opportunisticGraftThreshold;
 
-  /// How long the score of a disconnected peer is kept, so that the peer
-  /// cannot clear its penalties by reconnecting. The score is deleted when
-  /// the peer has been disconnected for this time
-  /// (go-libp2p-pubsub's `RetainScore`).
-  final Duration retainScore;
+  const PeerScoreThresholds({
+    this.gossipThreshold = 0,
+    this.publishThreshold = 0,
+    this.graylistThreshold = 0,
+    this.acceptPXThreshold = 0,
+    this.opportunisticGraftThreshold = 0,
+  });
 
-
-  const PeerScoreParams({
-    TopicScoreParams? defaultTopicParams,
-    this.topicParamsOverrides = const {},
-    this.appSpecificScore,
-    this.ipColocationFactor = 0.75, // Default to a 25% penalty factor
-    this.ipColocationFactorThreshold = 2,
-    this.ipColocationFactorWhitelist = 0.0, // Placeholder
-    this.decayInterval = const Duration(seconds: 1),
-    this.scoreDecay = 0.99,
-    this.decayToZero = 0.01,
-    this.deliveryRecordTTL = const Duration(minutes: 2),
-    this.scoreMin = -1000.0,
-    this.scoreMax = 1000.0,
-    this.graylistThreshold = -100.0,
-    this.graylistDuration = const Duration(minutes: 1),
-    this.opportunisticGraftThreshold = const Duration(minutes: 1),
-    this.behaviourPenaltyWeight = -10.0,
-    this.behaviourPenaltyDecay = 0.99,
-    this.behaviourPenaltyCap = -100.0,
-    this.retainScore = const Duration(hours: 1),
-  }) : defaultTopicParams = defaultTopicParams ?? const TopicScoreParams();
-
-  static PeerScoreParams get defaultParams => PeerScoreParams(defaultTopicParams: TopicScoreParams.defaultTopicParams);
-
-  /// Helper to get the effective TopicScoreParams for a given topic string.
-  TopicScoreParams getTopicParams(String topic) {
-    return topicParamsOverrides[topic] ?? defaultTopicParams;
+  /// Throws an [ArgumentError] if the thresholds are not consistent, as
+  /// go-libp2p-pubsub's `PeerScoreThresholds.validate`.
+  void validate() {
+    if (gossipThreshold > 0 || _isInvalidNumber(gossipThreshold)) {
+      throw ArgumentError('invalid gossip threshold; it must be <= 0 and a valid number');
+    }
+    if (publishThreshold > 0 || publishThreshold > gossipThreshold || _isInvalidNumber(publishThreshold)) {
+      throw ArgumentError('invalid publish threshold; it must be <= 0 and <= gossip threshold and a valid number');
+    }
+    if (graylistThreshold > 0 || graylistThreshold > publishThreshold || _isInvalidNumber(graylistThreshold)) {
+      throw ArgumentError('invalid graylist threshold; it must be <= 0 and <= publish threshold and a valid number');
+    }
+    if (acceptPXThreshold < 0 || _isInvalidNumber(acceptPXThreshold)) {
+      throw ArgumentError('invalid accept PX threshold; it must be >= 0 and a valid number');
+    }
+    if (opportunisticGraftThreshold < 0 || _isInvalidNumber(opportunisticGraftThreshold)) {
+      throw ArgumentError('invalid opportunistic grafting threshold; it must be >= 0 and a valid number');
+    }
   }
 }
 
-/// Defines the score thresholds for GossipSub peer management.
-class PeerScoreThresholds {
-  /// Score threshold to be accepted into the mesh.
-  final double publishThreshold; // Renamed from DScore in GossipSubParams for clarity here
+/// The parameters of peer scoring, as go-libp2p-pubsub's `PeerScoreParams`.
+///
+/// The score of a peer is
+///
+///     min(sum over scored topics of topicWeight * topic score, topicScoreCap)
+///       + P5 (app-specific) + P6 (IP colocation) + P7 (behaviour penalty)
+///
+/// Only the topics in [topics] are scored.
+class PeerScoreParams {
+  /// The score parameters of each scored topic.
+  final Map<String, TopicScoreParams> topics;
 
-  /// Score threshold to be chosen as a gossip target (IHAVE recipient).
-  final double gossipThreshold;
+  /// The cap on the sum of the topic scores; 0 for no cap. Must be >= 0.
+  final double topicScoreCap;
 
-  /// Score threshold to be accepted for opportunistic grafting.
-  final double opportunisticGraftThresholdValue; // Renamed to avoid conflict with Duration
+  /// P5: the application-specific score of a peer, multiplied by
+  /// [appSpecificWeight]. Defaults to 0 for every peer.
+  final double Function(PeerId peer) appSpecificScore;
+  final double appSpecificWeight;
 
-  const PeerScoreThresholds({
-    this.publishThreshold = -50.0, // Peers must have at least this score to receive our messages
-    this.gossipThreshold = -20.0,  // We only gossip to peers with at least this score
-    this.opportunisticGraftThresholdValue = 5.0, // We only opportunistically graft to peers with at least this score
+  /// P6: the IP colocation penalty. When more than
+  /// [ipColocationFactorThreshold] peers connect from one IP (or IPv6 /64),
+  /// each gets `weight * (peers - threshold)^2`. The weight must be <= 0.
+  final double ipColocationFactorWeight;
+  final int ipColocationFactorThreshold;
+
+  /// IP ranges (CIDR, such as `10.0.0.0/8`) not subject to P6.
+  final List<String> ipColocationFactorWhitelist;
+
+  /// P7: the behaviour penalty, `weight * (penalty - threshold)^2` when the
+  /// penalty counter is above [behaviourPenaltyThreshold]. The weight must
+  /// be <= 0; the counter decays by [behaviourPenaltyDecay] each
+  /// [decayInterval].
+  final double behaviourPenaltyWeight;
+  final double behaviourPenaltyThreshold;
+  final double behaviourPenaltyDecay;
+
+  /// How often counters decay. Must be at least 1 s.
+  final Duration decayInterval;
+
+  /// A decayed counter below this is set to 0. Must be in (0, 1).
+  final double decayToZero;
+
+  /// How long the score of a disconnected peer with a score <= 0 is kept,
+  /// so that it cannot clear its penalties by reconnecting.
+  final Duration retainScore;
+
+  /// How long message delivery records are kept (go-libp2p-pubsub's
+  /// `SeenMsgTTL`, default the seen-messages TTL).
+  final Duration seenMsgTTL;
+
+  const PeerScoreParams({
+    this.topics = const {},
+    this.topicScoreCap = 0,
+    this.appSpecificScore = _zeroScore,
+    this.appSpecificWeight = 0,
+    this.ipColocationFactorWeight = 0,
+    this.ipColocationFactorThreshold = 1,
+    this.ipColocationFactorWhitelist = const [],
+    this.behaviourPenaltyWeight = 0,
+    this.behaviourPenaltyThreshold = 0,
+    this.behaviourPenaltyDecay = 0.99,
+    this.decayInterval = defaultDecayInterval,
+    this.decayToZero = defaultDecayToZero,
+    this.retainScore = const Duration(hours: 1),
+    this.seenMsgTTL = const Duration(minutes: 2),
   });
 
-  static PeerScoreThresholds get defaultThresholds => const PeerScoreThresholds();
+  static double _zeroScore(PeerId peer) => 0;
+
+  /// Throws an [ArgumentError] if the parameters are not valid, as
+  /// go-libp2p-pubsub's `PeerScoreParams.validate`.
+  void validate() {
+    for (final entry in topics.entries) {
+      try {
+        entry.value.validate();
+      } on ArgumentError catch (e) {
+        throw ArgumentError('invalid score parameters for topic ${entry.key}: ${e.message}');
+      }
+    }
+    if (topicScoreCap < 0 || _isInvalidNumber(topicScoreCap)) {
+      throw ArgumentError('invalid topic score cap; must be positive (or 0 for no cap) and a valid number');
+    }
+    if (ipColocationFactorWeight > 0 || _isInvalidNumber(ipColocationFactorWeight)) {
+      throw ArgumentError('invalid IPColocationFactorWeight; must be negative (or 0 to disable) and a valid number');
+    }
+    if (ipColocationFactorWeight != 0 && ipColocationFactorThreshold < 1) {
+      throw ArgumentError('invalid IPColocationFactorThreshold; must be at least 1');
+    }
+    for (final cidr in ipColocationFactorWhitelist) {
+      if (IpNet.tryParse(cidr) == null) {
+        throw ArgumentError('invalid IPColocationFactorWhitelist entry: $cidr');
+      }
+    }
+    if (behaviourPenaltyWeight > 0 || _isInvalidNumber(behaviourPenaltyWeight)) {
+      throw ArgumentError('invalid BehaviourPenaltyWeight; must be negative (or 0 to disable) and a valid number');
+    }
+    if (behaviourPenaltyWeight != 0 &&
+        (behaviourPenaltyDecay <= 0 || behaviourPenaltyDecay >= 1 || _isInvalidNumber(behaviourPenaltyDecay))) {
+      throw ArgumentError('invalid BehaviourPenaltyDecay; must be between 0 and 1');
+    }
+    if (behaviourPenaltyThreshold < 0 || _isInvalidNumber(behaviourPenaltyThreshold)) {
+      throw ArgumentError('invalid BehaviourPenaltyThreshold; must be >= 0 and a valid number');
+    }
+    if (decayInterval < const Duration(seconds: 1)) {
+      throw ArgumentError('invalid DecayInterval; must be at least 1s');
+    }
+    if (decayToZero <= 0 || decayToZero >= 1 || _isInvalidNumber(decayToZero)) {
+      throw ArgumentError('invalid DecayToZero; must be between 0 and 1');
+    }
+  }
+}
+
+/// The score parameters of one topic, as go-libp2p-pubsub's
+/// `TopicScoreParams`. The topic score is
+///
+///     P1 * timeInMeshWeight + P2 * firstMessageDeliveriesWeight
+///       + P3 * meshMessageDeliveriesWeight + P3b * meshFailurePenaltyWeight
+///       + P4 * invalidMessageDeliveriesWeight
+///
+/// and is multiplied by [topicWeight] in the peer's score.
+class TopicScoreParams {
+  /// The weight of the topic in the score. Must be >= 0.
+  final double topicWeight;
+
+  /// P1: time in the mesh, in [timeInMeshQuantum]s, capped to
+  /// [timeInMeshCap]. The weight must be >= 0.
+  final double timeInMeshWeight;
+  final Duration timeInMeshQuantum;
+  final double timeInMeshCap;
+
+  /// P2: the messages that the peer delivered first, with decay, capped.
+  /// The weight must be >= 0.
+  final double firstMessageDeliveriesWeight;
+  final double firstMessageDeliveriesDecay;
+  final double firstMessageDeliveriesCap;
+
+  /// P3: the deficit of mesh message deliveries. A mesh peer that delivered
+  /// (first, or within [meshMessageDeliveriesWindow] of the first delivery)
+  /// fewer than [meshMessageDeliveriesThreshold] messages, once it has been
+  /// in the mesh for [meshMessageDeliveriesActivation], gets
+  /// `weight * deficit^2`. The weight must be <= 0.
+  final double meshMessageDeliveriesWeight;
+  final double meshMessageDeliveriesDecay;
+  final double meshMessageDeliveriesCap;
+  final double meshMessageDeliveriesThreshold;
+  final Duration meshMessageDeliveriesWindow;
+  final Duration meshMessageDeliveriesActivation;
+
+  /// P3b: a sticky penalty for a mesh delivery deficit at the time the peer
+  /// left the mesh. The weight must be <= 0.
+  final double meshFailurePenaltyWeight;
+  final double meshFailurePenaltyDecay;
+
+  /// P4: invalid messages, `weight * count^2`. The weight must be <= 0.
+  final double invalidMessageDeliveriesWeight;
+  final double invalidMessageDeliveriesDecay;
+
+  const TopicScoreParams({
+    this.topicWeight = 0,
+    this.timeInMeshWeight = 0,
+    this.timeInMeshQuantum = const Duration(seconds: 1),
+    this.timeInMeshCap = 0,
+    this.firstMessageDeliveriesWeight = 0,
+    this.firstMessageDeliveriesDecay = 0.5,
+    this.firstMessageDeliveriesCap = 0,
+    this.meshMessageDeliveriesWeight = 0,
+    this.meshMessageDeliveriesDecay = 0.5,
+    this.meshMessageDeliveriesCap = 0,
+    this.meshMessageDeliveriesThreshold = 0,
+    this.meshMessageDeliveriesWindow = Duration.zero,
+    this.meshMessageDeliveriesActivation = const Duration(seconds: 1),
+    this.meshFailurePenaltyWeight = 0,
+    this.meshFailurePenaltyDecay = 0.5,
+    this.invalidMessageDeliveriesWeight = 0,
+    this.invalidMessageDeliveriesDecay = 0.5,
+  });
+
+  /// Throws an [ArgumentError] if the parameters are not valid, as
+  /// go-libp2p-pubsub's `TopicScoreParams.validate`.
+  void validate() {
+    if (topicWeight < 0 || _isInvalidNumber(topicWeight)) {
+      throw ArgumentError('invalid topic weight; must be >= 0 and a valid number');
+    }
+
+    if (timeInMeshQuantum <= Duration.zero) {
+      throw ArgumentError('invalid TimeInMeshQuantum; must be positive');
+    }
+    if (timeInMeshWeight < 0 || _isInvalidNumber(timeInMeshWeight)) {
+      throw ArgumentError('invalid TimeInMeshWeight; must be positive (or 0 to disable) and a valid number');
+    }
+    if (timeInMeshWeight != 0 && (timeInMeshCap <= 0 || _isInvalidNumber(timeInMeshCap))) {
+      throw ArgumentError('invalid TimeInMeshCap; must be positive and a valid number');
+    }
+
+    if (firstMessageDeliveriesWeight < 0 || _isInvalidNumber(firstMessageDeliveriesWeight)) {
+      throw ArgumentError('invalid FirstMessageDeliveriesWeight; must be positive (or 0 to disable) and a valid number');
+    }
+    if (firstMessageDeliveriesWeight != 0 && !_isDecay(firstMessageDeliveriesDecay)) {
+      throw ArgumentError('invalid FirstMessageDeliveriesDecay; must be between 0 and 1');
+    }
+    if (firstMessageDeliveriesWeight != 0 &&
+        (firstMessageDeliveriesCap <= 0 || _isInvalidNumber(firstMessageDeliveriesCap))) {
+      throw ArgumentError('invalid FirstMessageDeliveriesCap; must be positive and a valid number');
+    }
+
+    if (meshMessageDeliveriesWeight > 0 || _isInvalidNumber(meshMessageDeliveriesWeight)) {
+      throw ArgumentError('invalid MeshMessageDeliveriesWeight; must be negative (or 0 to disable) and a valid number');
+    }
+    if (meshMessageDeliveriesWeight != 0 && !_isDecay(meshMessageDeliveriesDecay)) {
+      throw ArgumentError('invalid MeshMessageDeliveriesDecay; must be between 0 and 1');
+    }
+    if (meshMessageDeliveriesWeight != 0 &&
+        (meshMessageDeliveriesCap <= 0 || _isInvalidNumber(meshMessageDeliveriesCap))) {
+      throw ArgumentError('invalid MeshMessageDeliveriesCap; must be positive and a valid number');
+    }
+    if (meshMessageDeliveriesWeight != 0 &&
+        (meshMessageDeliveriesThreshold <= 0 || _isInvalidNumber(meshMessageDeliveriesThreshold))) {
+      throw ArgumentError('invalid MeshMessageDeliveriesThreshold; must be positive and a valid number');
+    }
+    if (meshMessageDeliveriesWindow < Duration.zero) {
+      throw ArgumentError('invalid MeshMessageDeliveriesWindow; must be non-negative');
+    }
+    if (meshMessageDeliveriesWeight != 0 && meshMessageDeliveriesActivation < const Duration(seconds: 1)) {
+      throw ArgumentError('invalid MeshMessageDeliveriesActivation; must be at least 1s');
+    }
+
+    if (meshFailurePenaltyWeight > 0 || _isInvalidNumber(meshFailurePenaltyWeight)) {
+      throw ArgumentError('invalid MeshFailurePenaltyWeight; must be negative (or 0 to disable) and a valid number');
+    }
+    if (meshFailurePenaltyWeight != 0 && !_isDecay(meshFailurePenaltyDecay)) {
+      throw ArgumentError('invalid MeshFailurePenaltyDecay; must be between 0 and 1');
+    }
+
+    if (invalidMessageDeliveriesWeight > 0 || _isInvalidNumber(invalidMessageDeliveriesWeight)) {
+      throw ArgumentError('invalid InvalidMessageDeliveriesWeight; must be negative (or 0 to disable) and a valid number');
+    }
+    if (!_isDecay(invalidMessageDeliveriesDecay)) {
+      throw ArgumentError('invalid InvalidMessageDeliveriesDecay; must be between 0 and 1');
+    }
+  }
+
+  static bool _isDecay(double d) => d > 0 && d < 1 && !_isInvalidNumber(d);
+}
+
+/// An IP range in CIDR notation, such as `192.168.0.0/16` or `fd00::/8`.
+class IpNet {
+  final List<int> _prefix;
+  final int _bits;
+
+  IpNet._(this._prefix, this._bits);
+
+  /// Parses [cidr], or returns null if it is not a valid CIDR range.
+  static IpNet? tryParse(String cidr) {
+    final slash = cidr.indexOf('/');
+    if (slash < 0) return null;
+    final address = InternetAddress.tryParse(cidr.substring(0, slash));
+    final bits = int.tryParse(cidr.substring(slash + 1));
+    if (address == null || bits == null || bits < 0 || bits > address.rawAddress.length * 8) {
+      return null;
+    }
+    return IpNet._(address.rawAddress, bits);
+  }
+
+  /// Whether [ip] is in this range.
+  bool contains(String ip) {
+    final address = InternetAddress.tryParse(ip);
+    if (address == null || address.rawAddress.length != _prefix.length) return false;
+    final raw = address.rawAddress;
+    for (var bit = 0; bit < _bits; bit++) {
+      final mask = 0x80 >> (bit % 8);
+      if ((raw[bit ~/ 8] & mask) != (_prefix[bit ~/ 8] & mask)) return false;
+    }
+    return true;
+  }
 }
