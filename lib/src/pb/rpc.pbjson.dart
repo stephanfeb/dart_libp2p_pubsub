@@ -91,8 +91,8 @@ const ControlIHave$json = {
 
 /// Descriptor for `ControlIHave`. Decode as a `google.protobuf.DescriptorProto`.
 final $typed_data.Uint8List controlIHaveDescriptor = $convert.base64Decode(
-    'CgxDb250cm9sSUhhdmUSGAoHdG9waWNJRBgBIAEoCVIHdG9waWNJRBIeCgptZXNzYWdlSURzGA'
-    'IgAygJUgptZXNzYWdlSURz');
+    'CgxDb250cm9sSUhhdmUSGAoHdG9waWNJRBgBIAEoCVIHdG9waWNJRBIeCgptZXNzYWdlSURz'
+    'GAIgAygMUgptZXNzYWdlSURz');
 
 @$core.Deprecated('Use controlIWantDescriptor instead')
 const ControlIWant$json = {
@@ -104,7 +104,7 @@ const ControlIWant$json = {
 
 /// Descriptor for `ControlIWant`. Decode as a `google.protobuf.DescriptorProto`.
 final $typed_data.Uint8List controlIWantDescriptor = $convert.base64Decode(
-    'CgxDb250cm9sSVdhbnQSHgoKbWVzc2FnZUlEcxgBIAMoCVIKbWVzc2FnZUlEcw==');
+    'CgxDb250cm9sSVdhbnQSHgoKbWVzc2FnZUlEcxgBIAMoDFIKbWVzc2FnZUlEcw==');
 
 @$core.Deprecated('Use controlGraftDescriptor instead')
 const ControlGraft$json = {
@@ -143,7 +143,7 @@ const ControlIDontWant$json = {
 
 /// Descriptor for `ControlIDontWant`. Decode as a `google.protobuf.DescriptorProto`.
 final $typed_data.Uint8List controlIDontWantDescriptor = $convert.base64Decode(
-    'ChBDb250cm9sSURvbnRXYW50Eh4KCm1lc3NhZ2VJRHMYASADKAlSCm1lc3NhZ2VJRHM=');
+    'ChBDb250cm9sSURvbnRXYW50Eh4KCm1lc3NhZ2VJRHMYASADKAxSCm1lc3NhZ2VJRHM=');
 
 @$core.Deprecated('Use peerInfoDescriptor instead')
 const PeerInfo$json = {
