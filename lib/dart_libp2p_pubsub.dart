@@ -2,6 +2,7 @@ library;
 
 export 'src/core/pubsub.dart'; // Exporting the main PubSub class
 export 'src/gossipsub/gossipsub.dart'; // Exporting GossipSubRouter
+export 'src/gossipsub/rpc_queue.dart' show defaultPeerOutboundQueueSize;
 export 'src/gossipsub/peer_gater.dart' show PeerGater, PeerGaterParams;
 export 'src/gossipsub/extensions.dart' show PeerExtensions, TestExtensionConfig;
 export 'src/core/message.dart'; // Exporting PubSubMessage

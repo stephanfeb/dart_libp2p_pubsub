@@ -15,6 +15,7 @@ import 'router.dart';
 import 'notify.dart';
 import 'blacklist.dart';
 import 'discovery.dart';
+import '../gossipsub/rpc_queue.dart' show defaultPeerOutboundQueueSize;
 import 'topic.dart';
 import 'comm.dart';
 import 'message.dart'; // For PubSubMessage used in publish
@@ -126,6 +127,10 @@ class PubSub {
   /// The maximum size of one RPC on the wire, in bytes.
   final int maxMessageSize;
 
+  /// The number of RPCs queued for a peer before more are dropped, as
+  /// go-libp2p-pubsub's `WithPeerOutboundQueueSize` (default 32).
+  final int peerOutboundQueueSize;
+
   final MessageIdFn _messageIdFn;
 
   /// How messages are signed and verified.
@@ -188,6 +193,10 @@ class PubSub {
   /// `WithMessageIdFn` (default [defaultMessageIdFn], which is Go's
   /// `DefaultMsgIdFn`). All nodes of a network must use the same function.
   ///
+  /// [peerOutboundQueueSize] is the number of RPCs queued for a peer before
+  /// more are dropped (default 32), as go-libp2p-pubsub's
+  /// `WithPeerOutboundQueueSize`. Raise it for bursts of messages.
+  ///
   /// [discovery] finds peers for our topics, as go-libp2p-pubsub's
   /// `WithDiscovery`: each subscribed topic is advertised under the
   /// namespace `floodsub:<topic>`, and while the router has not enough
@@ -202,6 +211,7 @@ class PubSub {
     this.validatorTimeout = defaultValidatorTimeout,
     this.validateThrottle = defaultValidateThrottle,
     this.maxMessageSize = defaultMaxMessageSize,
+    this.peerOutboundQueueSize = defaultPeerOutboundQueueSize,
     MessageIdFn messageIdFn = defaultMessageIdFn,
     MessageSignaturePolicy signaturePolicy = MessageSignaturePolicy.strictSign,
     this.noAuthor = false,
@@ -221,6 +231,9 @@ class PubSub {
         : PubSubDiscovery(discovery, options: discoveryOptions, connector: discoveryConnector),
     this.tracer = tracer ?? const NoOpEventTracer(),
     _idGenerator = MessageIdGenerator() { // Initialize the ID generator
+    if (peerOutboundQueueSize <= 0) {
+      throw ArgumentError.value(peerOutboundQueueSize, 'peerOutboundQueueSize', 'must be positive');
+    }
     _comms = PubSubProtocol(host, _handleRpc, maxMessageSize: maxMessageSize, protocols: router.protocols);
     _comms.onNewInboundPeer = _handleInboundPeer;
     _comms.onPeerDead = _handlePeerDead;

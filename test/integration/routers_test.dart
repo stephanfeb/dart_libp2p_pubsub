@@ -233,4 +233,37 @@ void main() {
       expect(n.router.enoughPeers(topic, 0), isFalse, reason: '${n.router}');
     }
   });
+
+  test('setTopicScoreParams scores a topic set after the router is created, as go-libp2p-pubsub Topic.SetScoreParams', () async {
+    expect(() => GossipSubRouter().setTopicScoreParams(topic, const TopicScoreParams(topicWeight: 1)),
+        throwsStateError, reason: 'scoring disabled');
+
+    final router = GossipSubRouter(
+      scoreParams: const PeerScoreParams(),
+      scoreThresholds: const PeerScoreThresholds(gossipThreshold: -10, publishThreshold: -50, graylistThreshold: -80),
+    );
+    // Before the router is attached, and after.
+    router.setTopicScoreParams('early', const TopicScoreParams(topicWeight: 1));
+    await node(router);
+    await startAll();
+    router.setTopicScoreParams(topic, const TopicScoreParams(
+      topicWeight: 1,
+      invalidMessageDeliveriesWeight: -1,
+      invalidMessageDeliveriesDecay: 0.5,
+    ));
+    expect(router.score!.topicScoreParams('early'), isNotNull);
+    expect(router.score!.topicScoreParams(topic)!.invalidMessageDeliveriesWeight, -1);
+    expect(() => router.setTopicScoreParams(topic, const TopicScoreParams(topicWeight: -1)), throwsArgumentError);
+  });
+
+  test('PubSub takes the per-peer outbound queue size, as go-libp2p-pubsub WithPeerOutboundQueueSize', () async {
+    final keyPair = await generateEd25519KeyPair();
+    final host = MockHost(PeerId.fromPublicKey(keyPair.publicKey), keyPair.privateKey);
+    expect(PubSub(host, GossipSubRouter(), privateKey: keyPair.privateKey).peerOutboundQueueSize,
+        defaultPeerOutboundQueueSize);
+    expect(PubSub(host, FloodSubRouter(), privateKey: keyPair.privateKey, peerOutboundQueueSize: 256)
+        .peerOutboundQueueSize, 256);
+    expect(() => PubSub(host, GossipSubRouter(), privateKey: keyPair.privateKey, peerOutboundQueueSize: 0),
+        throwsArgumentError);
+  });
 }

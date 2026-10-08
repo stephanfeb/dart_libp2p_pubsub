@@ -227,14 +227,23 @@ class GossipSubRouter implements Router {
   /// The score thresholds; all 0 when scoring is disabled.
   final PeerScoreThresholds thresholds;
 
-  final PeerScoreParams? _scoreParams;
-
   /// Whether our PRUNEs carry Peer Exchange.
   final bool doPX;
 
   /// The peer scoring, or null when scoring is disabled.
   PeerScore? get score => _score;
   PeerScore? _score;
+
+  /// Sets the score parameters of [topic] while the router runs, as
+  /// go-libp2p-pubsub's `Topic.SetScoreParams`: for a topic created after
+  /// the router, or to change its parameters. See
+  /// [PeerScore.setTopicScoreParams]. Throws a [StateError] if scoring is
+  /// disabled, and an [ArgumentError] if [params] is invalid.
+  void setTopicScoreParams(String topic, TopicScoreParams params) {
+    final score = _score;
+    if (score == null) throw StateError('peer scoring is not enabled in the router');
+    score.setTopicScoreParams(topic, params);
+  }
 
   /// The parameters of the peer gater, as go-libp2p-pubsub's
   /// `WithPeerGater`; null (the default) turns the gater off. When
@@ -368,15 +377,14 @@ class GossipSubRouter implements Router {
     this.doPX = false,
     this.peerGaterParams,
     this.testExtension,
-  })  : _scoreParams = scoreParams,
-        thresholds = scoreThresholds ?? const PeerScoreThresholds() {
+  })  : thresholds = scoreThresholds ?? const PeerScoreThresholds() {
     if ((scoreParams == null) != (scoreThresholds == null)) {
       throw ArgumentError('scoreParams and scoreThresholds must be given together');
     }
     this.params = params ?? GossipSubParams.defaultParams;
     this.params.validate();
-    scoreParams?.validate();
     thresholds.validate();
+    if (scoreParams != null) _score = PeerScore(scoreParams, connectionIps: _connectionIps);
     _mcache = MessageCache(historyLength: this.params.historyLength, historyGossip: this.params.historyGossip);
     _seenMessages = TimeCache<String>(this.params.seenMessagesTTL, strategy: this.params.seenMessagesStrategy);
   }
@@ -392,14 +400,11 @@ class GossipSubRouter implements Router {
   @override
   Future<void> attach(PubSub pubsub) async {
     _pubsub = pubsub;
-    _rpcQueueManagerOrNull = RpcOutgoingQueueManager(pubsub.comms, gossipSubIDv11);
+    _rpcQueueManagerOrNull = RpcOutgoingQueueManager(pubsub.comms, gossipSubIDv11,
+        maxQueueSize: pubsub.peerOutboundQueueSize);
     // As go-libp2p-pubsub, a v1.3 peer gets our extensions in our first RPC.
     pubsub.comms.onFirstRpc = (peer, protocol, rpc) =>
         protocol == gossipSubIDv13 ? extensions.firstRpc(peer, rpc) : rpc;
-    final scoreParams = _scoreParams;
-    if (scoreParams != null) {
-      _score = PeerScore(scoreParams, connectionIps: _connectionIps);
-    }
     final gaterParams = peerGaterParams;
     if (gaterParams != null) _gate = PeerGater(gaterParams, pubsub.host);
     _log.fine('GossipSubRouter attached to PubSub and RpcQueueManager initialized.');

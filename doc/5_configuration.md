@@ -94,6 +94,10 @@ The defaults are go-libp2p-pubsub's.
 
 With a v1.3 peer, each side announces its extensions in its first RPC, as go-libp2p-pubsub does; announcing them again costs a behaviour penalty of 10. No canonical extension exists yet. The experimental test extension is turned on with `GossipSubRouter(testExtension: TestExtensionConfig(onReceiveTestExtension: ...))`, as Go's `WithTestExtension`; `router.extensions.of(peer)` tells what a peer announced.
 
+### Outbound Queue
+
+`PubSub(peerOutboundQueueSize: 32)` is the number of RPCs queued for each peer before more are dropped, as go-libp2p-pubsub's `WithPeerOutboundQueueSize` (default 32, which `defaultPeerOutboundQueueSize` holds). Raise it if you publish bursts of messages faster than a peer's connection takes them. It must be positive.
+
 ### Message Validation
 
 -   `seenMessagesTTL` (`GossipSubParams`, default: `2 minutes`): How long the router remembers a message ID. A copy that arrives within this time is dropped as a duplicate without validation. As in go-libp2p-pubsub, the cache has no size limit.
@@ -156,6 +160,16 @@ final router = GossipSubRouter(
 ```
 
 The score follows go-libp2p-pubsub's `score.go`: per scored topic, P1 (time in mesh), P2 (first deliveries), P3 (mesh delivery deficit), P3b (mesh failure penalty) and P4 (invalid messages), weighted by `topicWeight` and capped by `topicScoreCap`; then P5 (application-specific), P6 (IP colocation) and P7 (behaviour penalty). Only the topics in `topics` are scored. Both parameter sets are validated with go-libp2p-pubsub's rules. `router.score` gives each peer's score and its components (`snapshot`).
+
+To score a topic created later, or to change a topic's parameters, call `router.setTopicScoreParams(topic, TopicScoreParams(...))`, as go-libp2p-pubsub's `Topic.SetScoreParams`. It works before or after the router starts, throws a `StateError` if scoring is off, and caps the peers' delivery counters if the new caps are lower. For example, to penalise the senders of rejected messages on a new topic (P4) instead of computing an application-specific score (P5):
+
+```dart
+router.setTopicScoreParams('room-42', TopicScoreParams(
+  topicWeight: 1,
+  invalidMessageDeliveriesWeight: -10,
+  invalidMessageDeliveriesDecay: scoreParameterDecay(const Duration(hours: 1)),
+));
+```
 
 The thresholds: below `gossipThreshold` a peer gets no gossip and its gossip is ignored; below `publishThreshold` it gets none of our published messages; below `graylistThreshold` its RPCs are ignored. With all thresholds at 0, any negative score graylists a peer.
 

@@ -57,7 +57,7 @@ class FloodSubRouter implements Router {
   @override
   Future<void> attach(PubSub pubsub) async {
     _pubsub = pubsub;
-    _queue = RpcOutgoingQueueManager(pubsub.comms, protocols.first);
+    _queue = RpcOutgoingQueueManager(pubsub.comms, protocols.first, maxQueueSize: pubsub.peerOutboundQueueSize);
   }
 
   @override

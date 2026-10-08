@@ -10,6 +10,10 @@ All notable changes to this project will be documented in this file.
 - `RECV_RPC` events carry the summary of the RPC (`meta`), and the RPC summaries list the subscriptions, as in Go.
 - Tracing after `dispose()` no longer throws: the event is dropped. `stop()` and `dispose()` can be called again.
 
+### Added for applications
+- **`GossipSubRouter.setTopicScoreParams(topic, params)`** sets or changes a topic's score parameters after the router is created, as go-libp2p-pubsub's `Topic.SetScoreParams`: a topic created later can use the built-in penalties (such as P4 for invalid messages). Lowering the delivery caps caps the peers' counters, as in Go. `PeerScore.topicScoreParams(topic)` reads them. The scorer is now created with the router rather than when it is attached.
+- **`PubSub(peerOutboundQueueSize: n)`** sets the number of RPCs queued per peer before more are dropped, as go-libp2p-pubsub's `WithPeerOutboundQueueSize` (default 32).
+
 ### Discovery
 - **Topic discovery works, as go-libp2p-pubsub's `WithDiscovery`.** `PubSub(discovery: ...)` takes a dart_libp2p `Discovery` service. PubSub advertises each subscribed topic, every second looks up the peers of the subscribed topics that the router has not enough peers on, and dials them through a backoff connector (`discoveryConnector`, default Go's). `discoveryOptions` are passed to the service. Before, the discovery helper was not connected to `PubSub`.
 - **Topics are advertised under Go's namespace, `floodsub:<topic>`**, so Dart and Go nodes find each other. The helper used `gossipsub_topic:<topic>`.

@@ -468,6 +468,12 @@ class MockPubSub extends _i1.Mock implements _i23.PubSub {
       ) as int);
 
   @override
+  int get peerOutboundQueueSize => (super.noSuchMethod(
+        Invocation.getter(#peerOutboundQueueSize),
+        returnValue: 0,
+      ) as int);
+
+  @override
   _i24.MessageSignaturePolicy get signaturePolicy => (super.noSuchMethod(
         Invocation.getter(#signaturePolicy),
         returnValue: _i24.MessageSignaturePolicy.strictSign,

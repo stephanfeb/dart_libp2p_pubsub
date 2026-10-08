@@ -97,6 +97,39 @@ class PeerScoreSnapshot {
 class PeerScore {
   final PeerScoreParams params;
 
+  /// The score parameters of each scored topic: those of [params], changed
+  /// by [setTopicScoreParams].
+  final Map<String, TopicScoreParams> _topics;
+
+  /// The score parameters of [topic], if it is scored.
+  TopicScoreParams? topicScoreParams(String topic) => _topics[topic];
+
+  /// Sets the score parameters of [topic], as go-libp2p-pubsub's
+  /// `SetTopicScoreParams` (`Topic.SetScoreParams`): a topic not scored
+  /// before is scored from now on. If the new parameters lower the caps of
+  /// first or mesh message deliveries, the counters of the peers are capped
+  /// to them. Throws an [ArgumentError] if [p] is invalid.
+  void setTopicScoreParams(String topic, TopicScoreParams p) {
+    p.validate();
+    final old = _topics[topic];
+    _topics[topic] = p;
+    if (old == null) return;
+    if (p.firstMessageDeliveriesCap >= old.firstMessageDeliveriesCap &&
+        p.meshMessageDeliveriesCap >= old.meshMessageDeliveriesCap) {
+      return;
+    }
+    for (final pstats in _peerStats.values) {
+      final t = pstats.topics[topic];
+      if (t == null) continue;
+      if (t.firstMessageDeliveries > p.firstMessageDeliveriesCap) {
+        t.firstMessageDeliveries = p.firstMessageDeliveriesCap;
+      }
+      if (t.meshMessageDeliveries > p.meshMessageDeliveriesCap) {
+        t.meshMessageDeliveries = p.meshMessageDeliveriesCap;
+      }
+    }
+  }
+
   /// Returns the IPs of the connections to a peer, for P6. Set by the
   /// router; IPv6 addresses also count for their /64.
   final List<String> Function(PeerId peer)? _connectionIps;
@@ -122,7 +155,8 @@ class PeerScore {
   /// [PeerScoreParams.validate]). [connectionIps] returns the IP addresses
   /// of the connections to a peer.
   PeerScore(this.params, {List<String> Function(PeerId peer)? connectionIps})
-      : _connectionIps = connectionIps {
+      : _connectionIps = connectionIps,
+        _topics = Map.of(params.topics) {
     params.validate();
   }
 
@@ -148,7 +182,7 @@ class PeerScore {
 
     var score = 0.0;
     for (final entry in pstats.topics.entries) {
-      final topicParams = params.topics[entry.key];
+      final topicParams = _topics[entry.key];
       if (topicParams == null) continue; // Not a scored topic.
       final t = entry.value;
       var topicScore = 0.0;
@@ -246,7 +280,7 @@ class PeerScore {
         return;
       }
       pstats.topics.forEach((topic, t) {
-        final topicParams = params.topics[topic];
+        final topicParams = _topics[topic];
         if (topicParams == null) return;
         t.firstMessageDeliveries = _decay(t.firstMessageDeliveries, topicParams.firstMessageDeliveriesDecay);
         t.meshMessageDeliveries = _decay(t.meshMessageDeliveries, topicParams.meshMessageDeliveriesDecay);
@@ -296,7 +330,7 @@ class PeerScore {
     }
     pstats.topics.forEach((topic, t) {
       t.firstMessageDeliveries = 0;
-      final threshold = params.topics[topic]?.meshMessageDeliveriesThreshold ?? 0;
+      final threshold = _topics[topic]?.meshMessageDeliveriesThreshold ?? 0;
       if (t.inMesh && t.meshMessageDeliveriesActive && t.meshMessageDeliveries < threshold) {
         final deficit = threshold - t.meshMessageDeliveries;
         t.meshFailurePenalty += deficit * deficit;
@@ -321,7 +355,7 @@ class PeerScore {
   void prune(PeerId peer, String topic) {
     final t = _topicStats(peer, topic);
     if (t == null) return;
-    final threshold = params.topics[topic]!.meshMessageDeliveriesThreshold;
+    final threshold = _topics[topic]!.meshMessageDeliveriesThreshold;
     if (t.meshMessageDeliveriesActive && t.meshMessageDeliveries < threshold) {
       final deficit = threshold - t.meshMessageDeliveries;
       t.meshFailurePenalty += deficit * deficit;
@@ -421,7 +455,7 @@ class PeerScore {
     if (pstats == null) return null;
     final existing = pstats.topics[topic];
     if (existing != null) return existing;
-    if (!params.topics.containsKey(topic)) return null;
+    if (!_topics.containsKey(topic)) return null;
     return pstats.topics[topic] = TopicScoreStats();
   }
 
@@ -433,7 +467,7 @@ class PeerScore {
   void _markFirstMessageDelivery(PeerId peer, String topic) {
     final t = _topicStats(peer, topic);
     if (t == null) return;
-    final topicParams = params.topics[topic]!;
+    final topicParams = _topics[topic]!;
     t.firstMessageDeliveries += 1;
     if (t.firstMessageDeliveries > topicParams.firstMessageDeliveriesCap) {
       t.firstMessageDeliveries = topicParams.firstMessageDeliveriesCap;
@@ -450,7 +484,7 @@ class PeerScore {
   void _markDuplicateMessageDelivery(PeerId peer, String topic, DateTime? validated) {
     final t = _topicStats(peer, topic);
     if (t == null || !t.inMesh) return;
-    final topicParams = params.topics[topic]!;
+    final topicParams = _topics[topic]!;
     if (validated != null &&
         clock.now().difference(validated) > topicParams.meshMessageDeliveriesWindow) {
       return;

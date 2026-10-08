@@ -5,6 +5,7 @@ import 'dart:typed_data'; // For Uint8List
 
 import 'package:dart_libp2p_pubsub/src/core/comm.dart'; // For PubSubProtocol and protocol IDs
 import 'package:dart_libp2p_pubsub/src/tracing/tracer.dart'; // For EventTracer
+import 'package:dart_libp2p_pubsub/src/gossipsub/rpc_queue.dart' show defaultPeerOutboundQueueSize;
 import 'package:dart_libp2p_pubsub/src/pb/trace.pb.dart' as trace_pb; // For trace event types
 import 'package:dart_libp2p_pubsub/src/pb/rpc.pb.dart' as pb; // For RPC message types
 import 'package:dart_libp2p_pubsub/src/core/topic.dart';
@@ -156,6 +157,7 @@ void main() {
       when(mockConnManager.protect(any, any)).thenReturn(null); // Stub protect
       when(mockConnManager.unprotect(any, any)).thenReturn(true); // Stub unprotect
       when(mockPubsub.comms).thenReturn(mockComms);
+      when(mockPubsub.peerOutboundQueueSize).thenReturn(defaultPeerOutboundQueueSize);
       when(mockPubsub.messageIdFn).thenReturn(defaultMessageIdFn);
       when(mockPubsub.tracer).thenReturn(mockTracer);
       when(mockPubsub.tracing).thenReturn(true);
@@ -1161,6 +1163,7 @@ void main() {
          // Re-stub other pubsub interactions that might have been cleared and are needed by router
         when(mockPubsub.host).thenReturn(mockHost);
         when(mockPubsub.comms).thenReturn(mockComms);
+        when(mockPubsub.peerOutboundQueueSize).thenReturn(defaultPeerOutboundQueueSize);
         when(mockPubsub.tracer).thenReturn(mockTracer);
         when(mockPubsub.tracing).thenReturn(true);
         when(mockPubsub.traceEvent(any)).thenAnswer((inv) => mockTracer.trace(inv.positionalArguments.first as trace_pb.TraceEvent));
@@ -1311,6 +1314,7 @@ void main() {
         // Re-stub pubsub methods that might be called by the router
         when(mockPubsub.host).thenReturn(mockHost); // Needed by router
         when(mockPubsub.comms).thenReturn(mockComms); // Needed by router
+        when(mockPubsub.peerOutboundQueueSize).thenReturn(defaultPeerOutboundQueueSize);
         when(mockPubsub.tracer).thenReturn(mockTracer); // Needed by router
         when(mockPubsub.tracing).thenReturn(true);
         when(mockPubsub.traceEvent(any)).thenAnswer((inv) => mockTracer.trace(inv.positionalArguments.first as trace_pb.TraceEvent));
@@ -1555,6 +1559,7 @@ void main() {
         when(mockPubsub.messageIdFn).thenReturn(defaultMessageIdFn);
         when(mockPubsub.host).thenReturn(mockHost);
         when(mockPubsub.comms).thenReturn(mockComms);
+        when(mockPubsub.peerOutboundQueueSize).thenReturn(defaultPeerOutboundQueueSize);
         when(mockPubsub.tracer).thenReturn(mockTracer);
         when(mockPubsub.tracing).thenReturn(true);
         when(mockPubsub.traceEvent(any)).thenAnswer((inv) => mockTracer.trace(inv.positionalArguments.first as trace_pb.TraceEvent));
@@ -1589,6 +1594,7 @@ void main() {
           when(mockHost.id).thenReturn(mockLocalPeerId); // From outer setup
           when(mockHost.network).thenReturn(mockNetwork);
           when(mockPubsub.comms).thenReturn(mockComms);
+          when(mockPubsub.peerOutboundQueueSize).thenReturn(defaultPeerOutboundQueueSize);
           when(mockPubsub.tracer).thenReturn(mockTracer);
           when(mockPubsub.tracing).thenReturn(true);
           when(mockPubsub.traceEvent(any)).thenAnswer((inv) => mockTracer.trace(inv.positionalArguments.first as trace_pb.TraceEvent));
@@ -1712,6 +1718,7 @@ void main() {
           when(mockHost.id).thenReturn(mockLocalPeerId);
           when(mockHost.network).thenReturn(mockNetwork);
           when(mockPubsub.comms).thenReturn(mockComms);
+          when(mockPubsub.peerOutboundQueueSize).thenReturn(defaultPeerOutboundQueueSize);
           when(mockPubsub.tracer).thenReturn(mockTracer);
           when(mockPubsub.tracing).thenReturn(true);
           when(mockPubsub.traceEvent(any)).thenAnswer((inv) => mockTracer.trace(inv.positionalArguments.first as trace_pb.TraceEvent));
@@ -2098,6 +2105,7 @@ void main() {
           when(mockHost.id).thenReturn(mockLocalPeerId);
           when(mockHost.network).thenReturn(mockNetwork);
           when(mockPubsub.comms).thenReturn(mockComms);
+          when(mockPubsub.peerOutboundQueueSize).thenReturn(defaultPeerOutboundQueueSize);
           when(mockPubsub.tracer).thenReturn(mockTracer);
           when(mockPubsub.tracing).thenReturn(true);
           when(mockPubsub.traceEvent(any)).thenAnswer((inv) => mockTracer.trace(inv.positionalArguments.first as trace_pb.TraceEvent));
@@ -2144,6 +2152,7 @@ void main() {
           when(mockHost.id).thenReturn(mockLocalPeerId);
           when(mockHost.network).thenReturn(mockNetwork);
           when(mockPubsub.comms).thenReturn(mockComms);
+          when(mockPubsub.peerOutboundQueueSize).thenReturn(defaultPeerOutboundQueueSize);
           when(mockPubsub.tracer).thenReturn(mockTracer);
           when(mockPubsub.tracing).thenReturn(true);
           when(mockPubsub.traceEvent(any)).thenAnswer((inv) => mockTracer.trace(inv.positionalArguments.first as trace_pb.TraceEvent));

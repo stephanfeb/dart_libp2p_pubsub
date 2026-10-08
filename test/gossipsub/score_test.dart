@@ -401,6 +401,55 @@ void main() {
       expect(scoreParameterDecay(const Duration(hours: 1)), closeTo(0.998721, 1e-6));
     });
   });
+
+
+  group('setTopicScoreParams, as go-libp2p-pubsub Topic.SetScoreParams', () {
+    test('a topic added after the scorer is scored from then on', () {
+      final s = scorer(const TopicScoreParams(topicWeight: 1));
+      s.addPeer(peerA);
+      s.validateMessage('m1');
+      s.rejectMessage('m1', peerA, 'late-topic', RejectReason.validationFailed);
+      expect(s.score(peerA), 0, reason: 'late-topic not scored yet');
+
+      s.setTopicScoreParams('late-topic', const TopicScoreParams(
+        topicWeight: 1,
+        invalidMessageDeliveriesWeight: -1,
+        invalidMessageDeliveriesDecay: 0.5,
+      ));
+      expect(s.topicScoreParams('late-topic')?.invalidMessageDeliveriesWeight, -1);
+      s.validateMessage('m2');
+      s.rejectMessage('m2', peerA, 'late-topic', RejectReason.validationFailed);
+      expect(s.score(peerA), -1);
+    });
+
+    test('lowering the delivery caps caps the counters', () {
+      final s = scorer(const TopicScoreParams(
+        topicWeight: 1,
+        firstMessageDeliveriesWeight: 1,
+        firstMessageDeliveriesDecay: 0.5,
+        firstMessageDeliveriesCap: 100,
+      ));
+      s.addPeer(peerA);
+      for (var i = 0; i < 10; i++) {
+        s.validateMessage('m$i');
+        s.deliverMessage('m$i', peerA, topic);
+      }
+      expect(s.snapshot(peerA)!.topics[topic]!.firstMessageDeliveries, 10);
+      s.setTopicScoreParams(topic, const TopicScoreParams(
+        topicWeight: 1,
+        firstMessageDeliveriesWeight: 1,
+        firstMessageDeliveriesDecay: 0.5,
+        firstMessageDeliveriesCap: 4,
+      ));
+      expect(s.snapshot(peerA)!.topics[topic]!.firstMessageDeliveries, 4);
+      expect(s.score(peerA), 4);
+    });
+
+    test('invalid parameters are refused', () {
+      final s = scorer(const TopicScoreParams(topicWeight: 1));
+      expect(() => s.setTopicScoreParams(topic, const TopicScoreParams(topicWeight: -1)), throwsArgumentError);
+    });
+  });
 }
 
 extension on PeerScoreParams {
