@@ -2,9 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
-## Unreleased
+## 3.0.0 - 2026-10-08
 
-### Tracing
+This release closes the remaining gaps with go-libp2p-pubsub v0.15.0 found by the 2.0.0 review: GossipSub v1.3, topic discovery, Go's trace formats, the peer gater and the seen-message cache. It also adds two options applications asked for: setting a topic's score parameters at runtime, and the outbound queue size.
+
+### Upgrading from 2.x
+- **Custom routers must implement `Router.enoughPeers(topic, suggested)`**, which discovery and `publish(ready:)` use. The built-in routers implement it. This is the only breaking API change.
+- **Trace files change format** to Go's (varint framing for `PbEventTracer`, Go's JSON for `JsonEventTracer`). Tools that read the old formats need updating.
+- **`GossipSubRouter` negotiates `/meshsub/1.3.0`** with peers that speak it (including Go v0.15.0 nodes). Older peers still negotiate 1.2.0 or lower.
+- **Messages for topics the node does not subscribe to are now dropped**, as in Go. A node that relied on validating or forwarding them must subscribe to the topic.
+
 - **The tracers write go-libp2p-pubsub's formats**, so Go's trace tools can read their files. `PbEventTracer` prefixes each event with its length as a varint, where it wrote 4 bytes. `JsonEventTracer` writes one JSON object per line with the fields named as in `trace.proto`, bytes in base64, and the type and timestamp as numbers, where it wrote field numbers as keys.
 - **Every event carries the local peer ID and a timestamp** (nanoseconds since the Unix epoch), as in Go. The router used to set `peerID` to the remote peer, and no event had a timestamp. Routers now send events through the new `PubSub.traceEvent`, which stamps them.
 - `RECV_RPC` events carry the summary of the RPC (`meta`), and the RPC summaries list the subscriptions, as in Go.
@@ -43,6 +50,9 @@ All notable changes to this project will be documented in this file.
 
 ### Tests
 - Peer Exchange is tested on a real network: peers pruned by a bootstrapper with PX connect to each other, build a mesh and exchange messages. The test stores the signed peer records in the bootstrapper's address book itself, as dart_libp2p 4.0.1's identify does not.
+
+### Known limitations
+- The PRUNEs we send rarely carry signed peer records: dart_libp2p 4.0.1's identify checks the records of remote peers but does not store them.
 
 ## 2.0.0 - 2026-10-08
 
