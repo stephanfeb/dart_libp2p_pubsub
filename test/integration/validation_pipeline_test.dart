@@ -594,4 +594,27 @@ void main() {
       expect(await _receive(receiver, forwarder, await _signedMessage(forwarder, topic, [2])), hasLength(1));
     });
   });
+
+  test('messages for topics we do not subscribe to are ignored before validation, as go-libp2p-pubsub', () async {
+    final receiver = await node();
+    final sender = await node();
+    final validated = <String>[];
+    for (final t in [topic, 'not-subscribed']) {
+      receiver.pubsub.registerTopicValidator(t, (from, m) {
+        validated.add(m.topic);
+        return ValidationResult.accept;
+      });
+    }
+    receiver.pubsub.subscribe(topic).stream.listen((m) => receiver.received.add(m as PubSubMessage));
+    await Future.delayed(const Duration(milliseconds: 100));
+
+    final rpc = pb.RPC()
+      ..publish.add(await _signedMessage(sender, 'not-subscribed', [1]))
+      ..publish.add(await _signedMessage(sender, topic, [2]));
+    await sender.pubsub.comms.sendRpc(receiver.id, rpc, sender.router.protocols.first);
+    await Future.delayed(const Duration(milliseconds: 300));
+
+    expect(validated, [topic]);
+    expect(receiver.received.map((m) => m.topic), [topic]);
+  });
 }

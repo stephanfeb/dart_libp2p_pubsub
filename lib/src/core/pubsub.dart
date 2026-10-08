@@ -253,7 +253,17 @@ class PubSub {
           ..subscriptions.addAll(rpc.subscriptions)
           ..control = rpc.control;
       case AcceptStatus.all:
-        break;
+        // As go-libp2p-pubsub: messages for topics we do not subscribe to
+        // are ignored, before validation.
+        if (rpc.publish.any((m) => !_subscriptions.containsKey(m.topic))) {
+          final filtered = pb.RPC()
+            ..subscriptions.addAll(rpc.subscriptions)
+            ..publish.addAll(rpc.publish.where((m) => _subscriptions.containsKey(m.topic)));
+          if (rpc.hasControl()) filtered.control = rpc.control;
+          _log.fine('PubSub: Ignoring ${rpc.publish.length - filtered.publish.length} messages from '
+              '${peerId.toBase58()} for topics we do not subscribe to.');
+          rpc = filtered;
+        }
     }
     // Let the router process the RPC first.
     // The router is responsible for validation, mcache, forwarding, and handling control messages.

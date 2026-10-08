@@ -17,6 +17,9 @@ All notable changes to this project will be documented in this file.
 - **Breaking for custom routers:** `Router` has a new method, `enoughPeers(topic, suggested)`, as Go's `EnoughPeers`. The built-in routers implement it with Go's rules.
 - Removed `PubSubDiscovery`'s old API (`addDiscoveryListener`, `discoverTopic`, `DEFAULT_GENERAL_PUBSUB_SERVICE_TAG`, `TOPIC_DISCOVERY_PREFIX`). The class was not exported.
 
+### Messages
+- **Messages for topics the node does not subscribe to are ignored**, before validation, as in go-libp2p-pubsub. They used to be validated, scored, cached and forwarded, which cost validation work on topics the node had no interest in.
+
 ## 2.0.0 - 2026-10-08
 
 A review against go-libp2p-pubsub v0.15.0 found remote denial-of-service holes, a crash, interop bugs and a peer-scoring model that did not work. This release fixes them and aligns the router with Go.
