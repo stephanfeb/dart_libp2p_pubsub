@@ -12,6 +12,10 @@ import 'package:dart_libp2p/core/peer/peer_id.dart';
 import 'package:dart_libp2p/core/peer/record.dart';
 import 'package:dart_libp2p/core/peerstore.dart' show AddressTTL;
 import 'package:dart_libp2p/core/record/envelope.dart';
+import 'package:dart_libp2p/core/event/bus.dart' as event_bus;
+import 'package:dart_libp2p/core/event/identify.dart' show EvtPeerIdentificationCompleted;
+import 'package:dart_libp2p/core/network/network.dart' show EvtPeerConnectednessChanged;
+import 'package:dart_libp2p/p2p/host/peerstore/pstoremem/addr_book.dart' show MemoryAddrBook;
 import 'package:clock/clock.dart';
 import 'package:fixnum/fixnum.dart';
 
@@ -337,9 +341,21 @@ class GossipSubRouter implements Router {
   int _pxConnecting = 0;
 
   /// The signed peer record of each peer, marshalled, as offered in our
-  /// Peer Exchange. Fetched from the certified address book in the
-  /// background, as building a PRUNE is synchronous.
+  /// Peer Exchange. Fetched from [_cab] in the background, as building a
+  /// PRUNE is synchronous.
   final Map<PeerId, List<int>> _signedRecords = {};
+
+  /// The router's own certified address book, as go-libp2p-pubsub's
+  /// `gs.cab`: it holds the signed peer records that identify received
+  /// (identify does not store them) and those received through Peer
+  /// Exchange. Our PRUNEs offer its records, and PX peers are dialed at its
+  /// addresses.
+  final MemoryAddrBook _cab = MemoryAddrBook();
+
+  /// The certified address book of the router (see [_cab]).
+  CertifiedAddrBook get certifiedAddrBook => _cab;
+
+  final List<event_bus.Subscription> _hostEvents = [];
 
   /// The protocols of GossipSub, in order of preference, as
   /// go-libp2p-pubsub's `GossipSubDefaultProtocols` (without v1.3).
@@ -407,6 +423,7 @@ class GossipSubRouter implements Router {
         protocol == gossipSubIDv13 ? extensions.firstRpc(peer, rpc) : rpc;
     final gaterParams = peerGaterParams;
     if (gaterParams != null) _gate = PeerGater(gaterParams, pubsub.host);
+    _manageAddrBook(pubsub);
     _log.fine('GossipSubRouter attached to PubSub and RpcQueueManager initialized.');
   }
 
@@ -423,6 +440,10 @@ class GossipSubRouter implements Router {
   @override
   Future<void> detach() async {
     await stop();
+    for (final sub in _hostEvents) {
+      await sub.close();
+    }
+    _hostEvents.clear();
     _rpcQueueManagerOrNull?.clearAll();
     _pubsub = null;
     _log.fine('GossipSubRouter detached.');
@@ -843,7 +864,10 @@ class GossipSubRouter implements Router {
       try {
         if (host.network.connectedness(peerId) == Connectedness.connected) continue;
         if (record != null && !await _consumePeerRecord(peerId, record)) continue;
-        final addrs = await host.peerStore.addrBook.addrs(peerId);
+        // As go-libp2p-pubsub, at the addresses of the router's address
+        // book; without a record, at those the host knows.
+        var addrs = await _cab.addrs(peerId);
+        if (addrs.isEmpty) addrs = await host.peerStore.addrBook.addrs(peerId);
         _log.fine('GossipSubRouter: Connecting to PX peer $peerId at $addrs.');
         await host.connect(AddrInfo(peerId, addrs)).timeout(params.connectionTimeout);
       } catch (e) {
@@ -869,23 +893,52 @@ class GossipSubRouter implements Router {
       _log.fine('GossipSubRouter: Invalid peer record from PX for $peerId: $e');
       return false;
     }
-    final (ok, cab) = getCertifiedAddrBook(_pubsub?.host.peerStore.addrBook);
-    if (ok) {
-      try {
-        await cab!.consumePeerRecord(envelope, AddressTTL.tempAddrTTL);
-      } catch (e) {
-        _log.fine('GossipSubRouter: Error storing peer record of $peerId: $e');
-      }
+    try {
+      await _cab.consumePeerRecord(envelope, AddressTTL.tempAddrTTL);
+    } catch (e) {
+      _log.fine('GossipSubRouter: Error storing peer record of $peerId: $e');
     }
     return true;
   }
 
+  /// Keeps [_cab] up to date from the host's events, as go-libp2p-pubsub's
+  /// `manageAddrBook`: stores the signed peer record of each identified
+  /// peer, and lowers the TTL of the addresses of a disconnected peer.
+  void _manageAddrBook(PubSub pubsub) {
+    final host = pubsub.host;
+    try {
+      final identified = host.eventBus.subscribe(EvtPeerIdentificationCompleted);
+      _hostEvents.add(identified);
+      identified.stream.listen((ev) async {
+        if (ev is! EvtPeerIdentificationCompleted) return;
+        final envelope = ev.signedPeerRecord;
+        if (envelope is! Envelope) return;
+        final ttl = host.network.connectedness(ev.peer) == Connectedness.connected
+            ? AddressTTL.connectedAddrTTL
+            : AddressTTL.recentlyConnectedAddrTTL;
+        try {
+          await _cab.consumePeerRecord(envelope, ttl);
+          if (doPX && _peerProtocols.containsKey(ev.peer)) _fetchSignedRecord(ev.peer);
+        } catch (e) {
+          _log.warning('GossipSubRouter: Failed to consume the signed peer record of ${ev.peer}: $e');
+        }
+      });
+      final connectedness = host.eventBus.subscribe(EvtPeerConnectednessChanged);
+      _hostEvents.add(connectedness);
+      connectedness.stream.listen((ev) {
+        if (ev is! EvtPeerConnectednessChanged || ev.connectedness == Connectedness.connected) return;
+        _cab.updateAddrs(ev.peer, AddressTTL.connectedAddrTTL, AddressTTL.recentlyConnectedAddrTTL);
+      });
+    } catch (e) {
+      // A host without an event bus (such as a test double).
+      _log.fine('GossipSubRouter: Cannot follow the host events, PX gets no signed peer records: $e');
+    }
+  }
+
   /// Fetches the signed peer record of [peerId] for our Peer Exchange.
   void _fetchSignedRecord(PeerId peerId) {
-    final (ok, cab) = getCertifiedAddrBook(_pubsub?.host.peerStore.addrBook);
-    if (!ok) return;
     () async {
-      final envelope = await cab!.getPeerRecord(peerId);
+      final envelope = await _cab.getPeerRecord(peerId);
       if (envelope == null || !_peerProtocols.containsKey(peerId)) return;
       _signedRecords[peerId] = await envelope.marshal();
     }().catchError((Object e) {

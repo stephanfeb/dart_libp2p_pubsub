@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+### Fixed
+- **Our Peer Exchange now carries signed peer records.** As go-libp2p-pubsub does, `GossipSubRouter` keeps its own certified address book (`router.certifiedAddrBook`) and stores in it the signed peer record of each peer that identify receives (from the host's `EvtPeerIdentificationCompleted` event). Our PRUNEs offer these records, and PX peers are dialed at its addresses. Before, the router read records from the host's address book, which identify never fills (it does not in go-libp2p either), so our PRUNEs rarely carried records and the pruned peers could not dial the peers offered. When a peer disconnects, its addresses in the book drop to the recently-connected TTL, as in Go.
+
 ## 3.0.0 - 2026-10-08
 
 This release closes the remaining gaps with go-libp2p-pubsub v0.15.0 found by the 2.0.0 review: GossipSub v1.3, topic discovery, Go's trace formats, the peer gater and the seen-message cache. It also adds two options applications asked for: setting a topic's score parameters at runtime, and the outbound queue size.

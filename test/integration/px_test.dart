@@ -1,13 +1,11 @@
 import 'dart:async';
 import 'dart:typed_data';
 
-import 'package:dart_libp2p/core/certified_addr_book.dart';
 import 'package:dart_libp2p/core/host/host.dart';
 import 'package:dart_libp2p/core/network/network.dart' show Connectedness;
 import 'package:dart_libp2p/core/network/rcmgr.dart';
 import 'package:dart_libp2p/core/peer/addr_info.dart';
 import 'package:dart_libp2p/core/peer/peer_id.dart';
-import 'package:dart_libp2p/core/peerstore.dart' show AddressTTL;
 import 'package:dart_libp2p/p2p/host/eventbus/basic.dart' as p2p_event_bus;
 import 'package:dart_libp2p/p2p/transport/connection_manager.dart' as p2p_conn_mgr;
 import 'package:dart_libp2p_pubsub/dart_libp2p_pubsub.dart';
@@ -41,17 +39,6 @@ class _Node {
 
   Future<void> connect(_Node other) => host.connect(AddrInfo(other.id, other.host.addrs));
 
-  /// Stores the signed peer record of [other] in our address book, as
-  /// go-libp2p's identify does. dart_libp2p 4.0.1's identify checks the
-  /// records of remote peers but does not store them.
-  Future<void> learnRecordOf(_Node other) async {
-    final (_, theirs) = getCertifiedAddrBook(other.host.peerStore.addrBook);
-    final record = await theirs!.getPeerRecord(other.id);
-    expect(record, isNotNull, reason: 'a host signs its own peer record');
-    final (_, ours) = getCertifiedAddrBook(host.peerStore.addrBook);
-    await ours!.consumePeerRecord(record!, AddressTTL.permanentAddrTTL);
-  }
-
   Future<void> stop() async {
     await pubsub.stop();
     await host.close();
@@ -80,8 +67,6 @@ void main() {
       }
     });
 
-    await bootstrapper.learnRecordOf(b);
-    await bootstrapper.learnRecordOf(c);
     for (final n in [bootstrapper, b, c]) {
       n.pubsub.subscribe(topic).stream.listen((m) => n.received.add(m as PubSubMessage));
     }
@@ -90,6 +75,12 @@ void main() {
     await _until(() => bootstrapper.router.mesh[topic]?.containsAll([b.id, c.id]) ?? false,
         reason: 'the bootstrapper to mesh with B and C');
     expect(b.host.network.connectedness(c.id), isNot(Connectedness.connected));
+    // As go-libp2p-pubsub, the router stores the signed peer records that
+    // identify received, to offer them in PX.
+    for (final peer in [b, c]) {
+      expect(await bootstrapper.router.certifiedAddrBook.getPeerRecord(peer.id), isNotNull,
+          reason: 'the record identify received from $peer');
+    }
 
     // The bootstrapper leaves the topic: its PRUNEs offer B to C and C to B.
     await bootstrapper.pubsub.unsubscribe(topic);
