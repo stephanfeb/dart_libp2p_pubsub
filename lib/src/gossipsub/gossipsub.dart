@@ -25,6 +25,7 @@ import 'rpc_queue.dart';
 import 'mcache.dart';
 import 'score.dart';
 import 'score_params.dart';
+import 'peer_gater.dart';
 import '../pb/trace.pb.dart' as trace_pb;
 import '../util/midgen.dart';
 import '../util/timecache.dart';
@@ -80,6 +81,10 @@ class GossipSubParams {
   /// How long the router remembers the ID of a message it has seen
   /// (go-libp2p-pubsub's `TimeCacheDuration`).
   final Duration seenMessagesTTL;
+
+  /// Whether [seenMessagesTTL] runs from when a message was first or last
+  /// seen (go-libp2p-pubsub's `WithSeenMessagesStrategy`; default first).
+  final SeenMessagesStrategy seenMessagesStrategy;
 
   /// Time between heartbeats.
   final Duration heartbeatInterval;
@@ -161,6 +166,7 @@ class GossipSubParams {
     this.maxPendingConnections = 128,
     this.connectionTimeout = const Duration(seconds: 30),
     this.seenMessagesTTL = const Duration(minutes: 2),
+    this.seenMessagesStrategy = SeenMessagesStrategy.firstSeen,
     this.heartbeatInterval = const Duration(seconds: 1),
     this.heartbeatInitialDelay = const Duration(milliseconds: 100),
     this.opportunisticGraftTicks = 60,
@@ -229,14 +235,24 @@ class GossipSubRouter implements Router {
   PeerScore? get score => _score;
   PeerScore? _score;
 
+  /// The parameters of the peer gater, as go-libp2p-pubsub's
+  /// `WithPeerGater`; null (the default) turns the gater off. When
+  /// validation is being throttled, the gater handles only the control
+  /// messages of some peers, the more often the fewer of their messages
+  /// were delivered.
+  final PeerGaterParams? peerGaterParams;
+
+  /// The peer gater, when [peerGaterParams] is given and the router is
+  /// attached.
+  PeerGater? get gate => _gate;
+  PeerGater? _gate;
+
   RpcOutgoingQueueManager? _rpcQueueManagerOrNull;
   late final MessageCache _mcache;
 
   /// IDs of the messages seen recently. A message is marked here once its
   /// signature is verified, so its later copies are not validated again.
-  late final FirstSeenCache<String> _seenMessages;
-
-  static const int _seenMessagesCapacity = 1 << 17;
+  late final TimeCache<String> _seenMessages;
 
   /// The mesh of each joined topic. A topic is joined while it has an entry.
   final Map<String, Set<PeerId>> mesh = {};
@@ -334,6 +350,7 @@ class GossipSubRouter implements Router {
     PeerScoreParams? scoreParams,
     PeerScoreThresholds? scoreThresholds,
     this.doPX = false,
+    this.peerGaterParams,
   })  : _scoreParams = scoreParams,
         thresholds = scoreThresholds ?? const PeerScoreThresholds() {
     if ((scoreParams == null) != (scoreThresholds == null)) {
@@ -344,7 +361,7 @@ class GossipSubRouter implements Router {
     scoreParams?.validate();
     thresholds.validate();
     _mcache = MessageCache(historyLength: this.params.historyLength, historyGossip: this.params.historyGossip);
-    _seenMessages = FirstSeenCache<String>(this.params.seenMessagesTTL, _seenMessagesCapacity);
+    _seenMessages = TimeCache<String>(this.params.seenMessagesTTL, strategy: this.params.seenMessagesStrategy);
   }
 
   bool _isSeen(String msgId) => _seenMessages.contains(msgId) || _mcache.seen(msgId);
@@ -363,6 +380,8 @@ class GossipSubRouter implements Router {
     if (scoreParams != null) {
       _score = PeerScore(scoreParams, connectionIps: _connectionIps);
     }
+    final gaterParams = peerGaterParams;
+    if (gaterParams != null) _gate = PeerGater(gaterParams, pubsub.host);
     _log.fine('GossipSubRouter attached to PubSub and RpcQueueManager initialized.');
   }
 
@@ -400,7 +419,7 @@ class GossipSubRouter implements Router {
   AcceptStatus acceptFrom(PeerId peer) {
     // As go-libp2p-pubsub: the RPCs of a graylisted peer are ignored.
     if (_scoreOf(peer) < thresholds.graylistThreshold) return AcceptStatus.none;
-    return AcceptStatus.all;
+    return _gate?.acceptFrom(peer) ?? AcceptStatus.all;
   }
 
   @override
@@ -413,6 +432,7 @@ class GossipSubRouter implements Router {
     final conns = _pubsub?.host.network.connsToPeer(peerId) ?? const [];
     _outbound[peerId] = conns.any((c) => !c.stat.stats.limited && c.stat.stats.direction == Direction.outbound);
     _score?.addPeer(peerId);
+    _gate?.addPeer(peerId);
     if (doPX) _fetchSignedRecord(peerId);
     _pubsub?.traceEvent(trace_pb.TraceEvent()
       ..type = trace_pb.TraceEvent_Type.ADD_PEER
@@ -435,7 +455,7 @@ class GossipSubRouter implements Router {
       peers.remove(peerId);
     }
     _peerTopics.remove(peerId);
-    _peerProtocols.remove(peerId);
+    if (_peerProtocols.remove(peerId) != null) _gate?.removePeer(peerId);
     _outbound.remove(peerId);
     _gossip.remove(peerId);
     _control.remove(peerId);
@@ -869,6 +889,7 @@ class GossipSubRouter implements Router {
     // The scorer credits a mesh peer for a timely copy, and penalises a
     // copy of an invalid message.
     _score?.duplicateMessage(msgIdStr, peerId, msgProto.topic);
+    _gate?.duplicateMessage(peerId);
   }
 
   /// Validates a new message from [peerId]. If the message is accepted, puts
@@ -895,6 +916,7 @@ class GossipSubRouter implements Router {
       }
       _seenMessages.add(msgIdStr);
       _score?.validateMessage(msgIdStr);
+      _gate?.validateMessage();
       _fulfillPromise(msgIdStr);
       return true;
     }
@@ -903,7 +925,8 @@ class GossipSubRouter implements Router {
     try {
       validationResult = await pubsub.validateMessage(
           PubSubMessage(rpcMessage: msgProto, receivedFrom: peerId),
-          markSeen: markSeen);
+          markSeen: markSeen,
+          onReject: _gate == null ? null : (reason) => _gate?.rejectMessage(peerId, reason));
     } catch (e) {
       _log.warning('GossipSubRouter: Validation of message ${messageIdToHex(msgIdStr)} from $peerId failed with an error: $e. Dropping.');
       return null;
@@ -939,6 +962,7 @@ class GossipSubRouter implements Router {
 
     _mcache.put(msgIdStr, msgProto);
     _score?.deliverMessage(msgIdStr, peerId, topicId);
+    _gate?.deliverMessage(peerId, topicId);
     _fulfillPromise(msgIdStr);
     pubsub.traceEvent(trace_pb.TraceEvent()
       ..type = trace_pb.TraceEvent_Type.DELIVER_MESSAGE
@@ -1068,6 +1092,7 @@ class GossipSubRouter implements Router {
   Future<void> start() async {
     // The heartbeat shifts the message cache.
     _score?.start();
+    _gate?.start();
     _heartbeatTimer?.cancel();
     _heartbeatTicks = 0;
     // The first heartbeat after the initial delay, then one every heartbeat
@@ -1098,6 +1123,7 @@ class GossipSubRouter implements Router {
     _signedRecords.clear();
     _rpcQueueManagerOrNull?.clearAll();
     _score?.stop();
+    _gate?.stop();
     _seenMessages.clear();
     _log.fine('GossipSubRouter stopped.');
   }

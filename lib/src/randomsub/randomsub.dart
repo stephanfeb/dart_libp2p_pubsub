@@ -17,7 +17,7 @@ class RandomSubRouter extends FloodSubRouter {
   final int networkSize;
   final Random _random;
 
-  RandomSubRouter({required this.networkSize, Random? random, super.seenMessagesTTL})
+  RandomSubRouter({required this.networkSize, Random? random, super.seenMessagesTTL, super.seenMessagesStrategy})
       : _random = random ?? Random();
 
   @override

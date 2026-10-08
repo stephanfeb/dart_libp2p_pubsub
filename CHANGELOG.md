@@ -20,6 +20,17 @@ All notable changes to this project will be documented in this file.
 ### Messages
 - **Messages for topics the node does not subscribe to are ignored**, before validation, as in go-libp2p-pubsub. They used to be validated, scored, cached and forwarded, which cost validation work on topics the node had no interest in.
 
+### Peer gater
+- **Added go-libp2p-pubsub's peer gater** (`WithPeerGater`): `GossipSubRouter(peerGaterParams: PeerGaterParams())`. When validation is throttled, it handles only the control messages of peers whose messages are mostly not delivered, at random. Off by default, as in Go.
+- `PubSub.validateMessage` takes `onReject`, called with the reason a message was dropped.
+- Removed `lib/src/core/peer_gater.dart`, a connection gater that nothing used and was not exported.
+
+### Seen messages
+- **The seen-message cache has no size limit, as in go-libp2p-pubsub.** It held at most 2^17 IDs and evicted the oldest beyond that, so under a high message rate a message could be validated and forwarded again within `seenMessagesTTL`.
+- The cache uses a monotonic clock, so a change to the system clock no longer expires IDs early or keeps them too long.
+- `seenMessagesStrategy` (`GossipSubParams`, `FloodSubRouter`, `RandomSubRouter`) chooses Go's first-seen (default) or last-seen expiry, as `WithSeenMessagesStrategy`.
+- Removed `lib/src/util/backoff.dart`, which nothing used and was not exported.
+
 ## 2.0.0 - 2026-10-08
 
 A review against go-libp2p-pubsub v0.15.0 found remote denial-of-service holes, a crash, interop bugs and a peer-scoring model that did not work. This release fixes them and aligns the router with Go.

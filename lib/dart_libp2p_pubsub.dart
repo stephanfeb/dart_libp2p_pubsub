@@ -2,6 +2,7 @@ library;
 
 export 'src/core/pubsub.dart'; // Exporting the main PubSub class
 export 'src/gossipsub/gossipsub.dart'; // Exporting GossipSubRouter
+export 'src/gossipsub/peer_gater.dart' show PeerGater, PeerGaterParams;
 export 'src/core/message.dart'; // Exporting PubSubMessage
 export 'src/core/subscription.dart'; // Exporting Subscription for type safety
 export 'src/gossipsub/score_params.dart'; // Exporting PeerScoreParams and TopicScoreParams for tuning
@@ -11,6 +12,7 @@ export 'src/core/discovery.dart' show discoveryNamespacePrefix, discoveryPollInt
 export 'src/core/topic.dart' show Topic;
 export 'src/core/blacklist.dart' show Blacklist;
 export 'src/core/comm.dart' show gossipSubIDv10, gossipSubIDv11, gossipSubIDv12, floodSubID, randomSubID;
+export 'src/util/timecache.dart' show SeenMessagesStrategy;
 export 'src/util/midgen.dart' show MessageIdFn, defaultMessageIdFn, messageIdFromBytes, messageIdToBytes;
 export 'src/floodsub/floodsub.dart' show FloodSubRouter, floodSubTopicSearchSize;
 export 'src/randomsub/randomsub.dart' show RandomSubRouter, randomSubD;

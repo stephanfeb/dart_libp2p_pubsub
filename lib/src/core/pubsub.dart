@@ -539,10 +539,16 @@ class PubSub {
   /// only after its signature is verified keeps a forged copy from blocking
   /// the genuine message. A router can tell a message that failed the
   /// structure or signature checks by [markSeen] not having been called.
-  Future<ValidationResult> validateMessage(PubSubMessage message, {bool Function()? markSeen}) async {
+  ///
+  /// [onReject], if given, is called with the reason of a dropped message,
+  /// one of go-libp2p-pubsub's rejection reasons (such as `validation
+  /// throttled`), as Go's raw tracers get it.
+  Future<ValidationResult> validateMessage(PubSubMessage message,
+      {bool Function()? markSeen, void Function(String reason)? onReject}) async {
     if (_activeValidations >= validateThrottle) {
       _log.fine('PubSub: validation throttled ($validateThrottle active); dropping message on "${message.topic}".');
       _traceReject(message, _rejectValidationThrottled);
+      onReject?.call(_rejectValidationThrottled);
       return ValidationResult.ignore;
     }
     _activeValidations++;
@@ -551,6 +557,7 @@ class PubSub {
       if (reason == _duplicate) return result;
       if (result != ValidationResult.accept) {
         _traceReject(message, reason!);
+        onReject?.call(reason);
       }
       return result;
     } finally {

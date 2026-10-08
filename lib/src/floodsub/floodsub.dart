@@ -31,7 +31,12 @@ class FloodSubRouter implements Router {
 
   /// How long the ID of a seen message is remembered.
   final Duration seenMessagesTTL;
-  late final FirstSeenCache<String> _seen = FirstSeenCache<String>(seenMessagesTTL, 1 << 17);
+
+  /// Whether [seenMessagesTTL] runs from when a message was first or last
+  /// seen (go-libp2p-pubsub's `WithSeenMessagesStrategy`).
+  final SeenMessagesStrategy seenMessagesStrategy;
+
+  late final TimeCache<String> _seen = TimeCache<String>(seenMessagesTTL, strategy: seenMessagesStrategy);
 
   /// The pubsub protocol of each peer added.
   final Map<PeerId, String> peerProtocols = {};
@@ -39,7 +44,10 @@ class FloodSubRouter implements Router {
   /// The topics each peer is subscribed to.
   final Map<PeerId, Set<String>> _peerTopics = {};
 
-  FloodSubRouter({this.seenMessagesTTL = const Duration(minutes: 2)});
+  FloodSubRouter({
+    this.seenMessagesTTL = const Duration(minutes: 2),
+    this.seenMessagesStrategy = SeenMessagesStrategy.firstSeen,
+  });
 
   @override
   List<String> get protocols => const [floodSubID];

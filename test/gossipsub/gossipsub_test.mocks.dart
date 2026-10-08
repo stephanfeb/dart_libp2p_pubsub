@@ -609,12 +609,16 @@ class MockPubSub extends _i1.Mock implements _i23.PubSub {
   _i20.Future<_i28.ValidationResult> validateMessage(
     _i29.PubSubMessage? message, {
     bool Function()? markSeen,
+    void Function(String)? onReject,
   }) =>
       (super.noSuchMethod(
         Invocation.method(
           #validateMessage,
           [message],
-          {#markSeen: markSeen},
+          {
+            #markSeen: markSeen,
+            #onReject: onReject,
+          },
         ),
         returnValue: _i20.Future<_i28.ValidationResult>.value(
             _i28.ValidationResult.accept),

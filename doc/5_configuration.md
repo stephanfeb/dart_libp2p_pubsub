@@ -94,7 +94,8 @@ The defaults are go-libp2p-pubsub's.
 
 ### Message Validation
 
--   `seenMessagesTTL` (`GossipSubParams`, default: `2 minutes`): How long the router remembers a message ID. A copy that arrives within this time is dropped as a duplicate without validation.
+-   `seenMessagesTTL` (`GossipSubParams`, default: `2 minutes`): How long the router remembers a message ID. A copy that arrives within this time is dropped as a duplicate without validation. As in go-libp2p-pubsub, the cache has no size limit.
+-   `seenMessagesStrategy` (`GossipSubParams`, default: `SeenMessagesStrategy.firstSeen`): Whether `seenMessagesTTL` runs from when a message was first seen or, with `lastSeen`, from when it was last seen, as Go's `WithSeenMessagesStrategy`. `FloodSubRouter` and `RandomSubRouter` take both too.
 -   `validatorTimeout` (`PubSub` constructor, default: `5 seconds`): The default time limit for one run of a topic validator. A slower run gives `ignore`. `Duration.zero` means no limit. `registerTopicValidator(..., timeout:)` sets it per topic.
 -   `validateThrottle` (`PubSub` constructor, default: `8192`): The maximum number of messages in validation at the same time. More messages are dropped as `ignore`. `registerTopicValidator(..., concurrency:)` sets a per-topic limit (default `1024`).
 
@@ -120,6 +121,10 @@ await pubsub.publish(topic, data, ready: minTopicSize(3), readyTimeout: Duration
 ```
 
 The router decides when the topic is ready (`minTopicSize(n)` asks `enoughPeers(topic, n)`). While waiting, PubSub looks up peers of the topic if it has a discovery service. If `readyTimeout` passes first, the message is not published and a `TimeoutException` is thrown.
+
+### Peer Gater
+
+As go-libp2p-pubsub's `WithPeerGater`, `GossipSubRouter(peerGaterParams: PeerGaterParams())` turns on the peer gater, which is off by default. When validation is being throttled (more than `validateThrottle` messages in validation), the gater handles only the control messages of some peers, chosen at random, the more likely the fewer of their messages were delivered: duplicates, ignored and rejected messages count against a peer (`duplicateWeight`, `ignoreWeight`, `rejectWeight`). Counters are kept per IP address, decay over time, and are kept for `retainStats` (6 hours) after the last peer of an address disconnects. `PeerGaterParams` has Go's defaults (`threshold: 0.33`, `quiet: 1 minute`...).
 
 ### Peer Scoring
 

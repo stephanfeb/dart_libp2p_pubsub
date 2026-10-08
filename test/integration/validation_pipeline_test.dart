@@ -34,6 +34,7 @@ Future<_Node> _createNode(
   MessageSignaturePolicy signaturePolicy = MessageSignaturePolicy.strictSign,
   bool noAuthor = false,
   MessageIdFn messageIdFn = defaultMessageIdFn,
+  PeerGaterParams? peerGaterParams,
 }) async {
   final keyPair = await generateEd25519KeyPair();
   final peerId = PeerId.fromPublicKey(keyPair.publicKey);
@@ -42,7 +43,7 @@ Future<_Node> _createNode(
   manager.registerNetwork(peerId, host.network as MockNetwork);
 
   final router = GossipSubRouter(
-      params: params, scoreParams: _scoreParams, scoreThresholds: _thresholds);
+      params: params, scoreParams: _scoreParams, scoreThresholds: _thresholds, peerGaterParams: peerGaterParams);
   final pubsub = PubSub(host, router,
       privateKey: keyPair.privateKey,
       validateThrottle: validateThrottle,
@@ -124,13 +125,15 @@ void main() {
       GossipSubParams? params,
       MessageSignaturePolicy signaturePolicy = MessageSignaturePolicy.strictSign,
       bool noAuthor = false,
-      MessageIdFn messageIdFn = defaultMessageIdFn}) async {
+      MessageIdFn messageIdFn = defaultMessageIdFn,
+      PeerGaterParams? peerGaterParams}) async {
     final n = await _createNode(manager,
         validateThrottle: validateThrottle,
         params: params,
         signaturePolicy: signaturePolicy,
         noAuthor: noAuthor,
-        messageIdFn: messageIdFn);
+        messageIdFn: messageIdFn,
+        peerGaterParams: peerGaterParams);
     nodes.add(n);
     return n;
   }
@@ -616,5 +619,25 @@ void main() {
 
     expect(validated, [topic]);
     expect(receiver.received.map((m) => m.topic), [topic]);
+  });
+
+  test('the peer gater throttles a peer whose messages are rejected while validation is throttled, as go-libp2p-pubsub', () async {
+    final receiver = await node(validateThrottle: 1, peerGaterParams: PeerGaterParams());
+    final bad = await node();
+    final good = await node();
+    receiver.pubsub.registerTopicValidator(topic, (from, m) async {
+      await Future.delayed(const Duration(milliseconds: 50));
+      return from == bad.id ? ValidationResult.reject : ValidationResult.accept;
+    });
+    expect(receiver.router.acceptFrom(bad.id), AcceptStatus.all);
+
+    // One message in validation; the second is throttled.
+    final first = _receive(receiver, bad, await _signedMessage(bad, topic, [1]));
+    await Future.delayed(const Duration(milliseconds: 10));
+    expect(await _receive(receiver, good, await _signedMessage(good, topic, [2])), isEmpty);
+    await first;
+
+    final statuses = Iterable.generate(200, (_) => receiver.router.acceptFrom(bad.id)).toList();
+    expect(statuses, contains(AcceptStatus.control));
   });
 }

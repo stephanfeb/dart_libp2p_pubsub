@@ -1155,7 +1155,7 @@ void main() {
         when(mockTracer.trace(any)).thenAnswer((_) => {});
         when(mockComms.sendRpc(any, any, any)).thenAnswer((_) async {});
         // Default validation to accept
-        when(mockPubsub.validateMessage(any, markSeen: anyNamed('markSeen'))).thenAnswer((inv) => _validated(inv, ValidationResult.accept));
+        when(mockPubsub.validateMessage(any, markSeen: anyNamed('markSeen'), onReject: anyNamed('onReject'))).thenAnswer((inv) => _validated(inv, ValidationResult.accept));
         when(mockPubsub.deliverMessage(any)).thenAnswer((_) {}); // Default for deliver
         when(mockPubsub.messageIdFn).thenReturn(defaultMessageIdFn); // Ensure router uses the same ID fn
          // Re-stub other pubsub interactions that might have been cleared and are needed by router
@@ -1267,7 +1267,7 @@ void main() {
         router.mesh[testTopicName]!.add(mockOtherMeshPeer);
 
         // Ensure validateMessage is stubbed to accept for both passes
-        when(mockPubsub.validateMessage(any, markSeen: anyNamed('markSeen'))).thenAnswer((inv) => _validated(inv, ValidationResult.accept));
+        when(mockPubsub.validateMessage(any, markSeen: anyNamed('markSeen'), onReject: anyNamed('onReject'))).thenAnswer((inv) => _validated(inv, ValidationResult.accept));
         when(mockPubsub.messageIdFn).thenReturn(defaultMessageIdFn);
 
 
@@ -1315,7 +1315,7 @@ void main() {
         when(mockPubsub.tracing).thenReturn(true);
         when(mockPubsub.traceEvent(any)).thenAnswer((inv) => mockTracer.trace(inv.positionalArguments.first as trace_pb.TraceEvent));
         when(mockPubsub.getTopics()).thenReturn([testTopicName]); // For _shouldProcessMessage
-        when(mockPubsub.validateMessage(any, markSeen: anyNamed('markSeen'))).thenAnswer((inv) => _validated(inv, ValidationResult.accept)); // Still need validation before duplicate check
+        when(mockPubsub.validateMessage(any, markSeen: anyNamed('markSeen'), onReject: anyNamed('onReject'))).thenAnswer((inv) => _validated(inv, ValidationResult.accept)); // Still need validation before duplicate check
         when(mockPubsub.messageIdFn).thenReturn(defaultMessageIdFn);
         when(mockPubsub.deliverMessage(any)).thenAnswer((_) { // This should NOT be called for duplicate
           fail('deliverMessage should not be called for a duplicate message');
@@ -1374,7 +1374,7 @@ void main() {
         await router.addPeer(mockOtherMeshPeer, '/meshsub/1.1.0');
 
         // Stub validateMessage to REJECT
-        when(mockPubsub.validateMessage(any, markSeen: anyNamed('markSeen'))).thenAnswer((inv) => _validated(inv, ValidationResult.reject));
+        when(mockPubsub.validateMessage(any, markSeen: anyNamed('markSeen'), onReject: anyNamed('onReject'))).thenAnswer((inv) => _validated(inv, ValidationResult.reject));
 
         // Ensure deliverMessage and sendRpc are not called
         when(mockPubsub.deliverMessage(any)).thenAnswer((_) {
@@ -1392,7 +1392,7 @@ void main() {
 
         // 3. Verification
         expect(accepted, isEmpty);
-        verify(mockPubsub.validateMessage(any, markSeen: anyNamed('markSeen'))).called(1);
+        verify(mockPubsub.validateMessage(any, markSeen: anyNamed('markSeen'), onReject: anyNamed('onReject'))).called(1);
         // The delivering peer is penalised on the topic.
         expect(router.score!.snapshot(mockSendingPeer)!.topics[testTopicName]?.invalidMessageDeliveries, 1);
         expect(router.score!.score(mockSendingPeer), lessThan(0));
@@ -1416,7 +1416,7 @@ void main() {
         when(mockTracer.trace(any)).thenAnswer((_) => {});
         final acceptedDup = await router.handleRpc(mockOtherMeshPeer, incomingRpc);
         expect(acceptedDup, isEmpty);
-        verifyNever(mockPubsub.validateMessage(any, markSeen: anyNamed('markSeen')));
+        verifyNever(mockPubsub.validateMessage(any, markSeen: anyNamed('markSeen'), onReject: anyNamed('onReject')));
         expect(router.score!.snapshot(mockOtherMeshPeer)!.topics[testTopicName]?.invalidMessageDeliveries, 1);
         final dupTraces = verify(mockTracer.trace(captureAny)).captured.cast<trace_pb.TraceEvent>();
         expect(dupTraces.where((t) => t.type == trace_pb.TraceEvent_Type.DUPLICATE_MESSAGE), isNotEmpty);
@@ -1432,7 +1432,7 @@ void main() {
         router.mesh[testTopicName]!.add(mockOtherMeshPeer);
 
         await router.addPeer(mockSendingPeer, '/meshsub/1.1.0');
-        when(mockPubsub.validateMessage(any, markSeen: anyNamed('markSeen'))).thenAnswer((inv) => _validated(inv, ValidationResult.ignore));
+        when(mockPubsub.validateMessage(any, markSeen: anyNamed('markSeen'), onReject: anyNamed('onReject'))).thenAnswer((inv) => _validated(inv, ValidationResult.ignore));
         when(mockComms.sendRpc(any, any, any)).thenAnswer((_) async {
           fail('sendRpc should not be called for an ignored message');
         });
@@ -1550,7 +1550,7 @@ void main() {
         // Re-stub default behaviors
         when(mockTracer.trace(any)).thenAnswer((_) => {});
         when(mockComms.sendRpc(any, any, any)).thenAnswer((_) async {});
-        when(mockPubsub.validateMessage(any, markSeen: anyNamed('markSeen'))).thenAnswer((inv) => _validated(inv, ValidationResult.accept));
+        when(mockPubsub.validateMessage(any, markSeen: anyNamed('markSeen'), onReject: anyNamed('onReject'))).thenAnswer((inv) => _validated(inv, ValidationResult.accept));
         when(mockPubsub.deliverMessage(any)).thenAnswer((_) {});
         when(mockPubsub.messageIdFn).thenReturn(defaultMessageIdFn);
         when(mockPubsub.host).thenReturn(mockHost);
@@ -2266,7 +2266,7 @@ void main() {
           setScore(r, p, 0);
           r.handleRpc(p, pb.RPC()..subscriptions.add(pb.RPC_SubOpts()..subscribe = true..topicid = testTopicName));
         }
-        when(mockPubsub.validateMessage(any, markSeen: anyNamed('markSeen')))
+        when(mockPubsub.validateMessage(any, markSeen: anyNamed('markSeen'), onReject: anyNamed('onReject')))
             .thenAnswer((inv) => _validated(inv, ValidationResult.accept));
         async.flushMicrotasks();
         sent = captureSentRpcs();

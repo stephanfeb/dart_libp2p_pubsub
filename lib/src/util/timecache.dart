@@ -1,222 +1,126 @@
-import 'dart:async';
-import 'dart:collection'; // For LinkedHashMap
+import 'dart:collection';
 
-/// A cache that stores the first time a key was seen, with a TTL.
-///
-/// Entries are evicted when their TTL expires or randomly if the cache exceeds
-/// its capacity (though random eviction is a simplified approach here compared
-/// to go-libp2p-pubsub's RandomExpireCache which has more specific logic).
-class FirstSeenCache<K> {
-  final Duration _ttl;
-  final int _capacity;
-  final LinkedHashMap<K, DateTime> _entries = LinkedHashMap<K, DateTime>();
-  Timer? _gcTimer;
+/// How long a seen message ID is remembered, as go-libp2p-pubsub's
+/// `TimeCacheStrategy` (`WithSeenMessagesStrategy`).
+enum SeenMessagesStrategy {
+  /// An ID expires its TTL after it was first seen (Go's default).
+  firstSeen,
 
-  /// Creates a new [FirstSeenCache].
-  ///
-  /// [_ttl] is the time-to-live for entries.
-  /// [_capacity] is the maximum number of entries the cache can hold.
-  /// [gcInterval] is the interval for periodic garbage collection of expired entries.
-  /// If null, GC only happens on access or when adding new entries if capacity is hit.
-  FirstSeenCache(this._ttl, this._capacity, {Duration? gcInterval}) {
-    if (gcInterval != null && gcInterval.inMilliseconds > 0) {
-      _gcTimer = Timer.periodic(gcInterval, (_) => _gc());
-    }
-  }
-
-  /// Adds a key to the cache if it's not already present.
-  ///
-  /// Returns `true` if the key was added (i.e., it was the first time it was seen
-  /// or its previous entry expired), `false` otherwise.
-  /// If the key was already present and not expired, its timestamp is NOT updated.
-  bool add(K key) {
-    final now = DateTime.now();
-    final existingEntryTime = _entries[key];
-
-    if (existingEntryTime != null) {
-      if (now.difference(existingEntryTime) <= _ttl) {
-        return false; // Still valid, not adding again
-      } else {
-        // Expired, remove to re-add with new timestamp
-        _entries.remove(key);
-      }
-    }
-
-    // Ensure capacity before adding
-    _ensureCapacity();
-
-    _entries[key] = now;
-    return true;
-  }
-
-  /// Checks if a key is present in the cache and has not expired.
-  bool contains(K key) {
-    final entryTime = _entries[key];
-    if (entryTime == null) {
-      return false;
-    }
-    if (DateTime.now().difference(entryTime) > _ttl) {
-      _entries.remove(key); // Eagerly remove expired on access
-      return false;
-    }
-    return true;
-  }
-
-  /// Removes expired entries from the cache.
-  ///
-  /// Entries are kept in the order they were added, which is also the order
-  /// of their timestamps, so the scan stops at the first entry that has not
-  /// expired.
-  void _gc() {
-    final now = DateTime.now();
-    while (_entries.isNotEmpty) {
-      final oldestKey = _entries.keys.first;
-      if (now.difference(_entries[oldestKey]!) <= _ttl) break;
-      _entries.remove(oldestKey);
-    }
-  }
-
-  /// Ensures the cache does not exceed its capacity.
-  /// If over capacity, removes entries (currently oldest, could be random).
-  void _ensureCapacity() {
-    // Perform a GC pass first to clear out expired items
-    _gc();
-
-    // If still over capacity, remove oldest items (LinkedHashMap preserves insertion order)
-    // Go's RandomExpireCache removes random entries. For simplicity, we do LRU-like here.
-    while (_entries.length >= _capacity && _capacity > 0) { // Check >= because we are about to add one
-      if (_entries.isEmpty) break;
-      final keyToRemove = _entries.keys.first;
-      _entries.remove(keyToRemove);
-      // print('FirstSeenCache: Evicted $keyToRemove due to capacity limit.');
-    }
-  }
-
-  /// Clears all entries from the cache.
-  void clear() {
-    _entries.clear();
-  }
-
-  /// Disposes of the cache, stopping any timers.
-  void dispose() {
-    _gcTimer?.cancel();
-    _gcTimer = null;
-    clear();
-  }
-
-  int get length => _entries.length;
+  /// An ID expires its TTL after it was last seen: each time it is seen
+  /// again, its TTL starts again.
+  lastSeen,
 }
 
-// TODO: Implement LastSeenCache if needed. (Now implemented below)
-// It would be similar but `add` would update the timestamp if the key exists.
+/// A monotonic clock: the time since some fixed point, unaffected by
+/// changes to the wall clock.
+typedef MonotonicClock = Duration Function();
 
-/// A cache that stores the last time a key was seen, with a TTL.
+final Stopwatch _stopwatch = Stopwatch()..start();
+
+/// The default [MonotonicClock].
+Duration monotonicNow() => _stopwatch.elapsed;
+
+/// A set of keys that each expire after a TTL, as go-libp2p-pubsub's
+/// `timecache.TimeCache`. It has no size limit, as Go's: it holds the keys
+/// seen in the last TTL. Expired keys are removed as keys are added.
 ///
-/// Entries are evicted when their TTL expires or when the cache exceeds
-/// its capacity (evicting the oldest entry).
-class LastSeenCache<K> {
+/// Time is read from a monotonic clock, so a change to the wall clock does
+/// not expire keys early or keep them too long.
+abstract class TimeCache<K> {
   final Duration _ttl;
-  final int _capacity;
-  final LinkedHashMap<K, DateTime> _entries = LinkedHashMap<K, DateTime>();
-  Timer? _gcTimer;
+  final MonotonicClock _clock;
 
-  /// Creates a new [LastSeenCache].
-  ///
-  /// [_ttl] is the time-to-live for entries.
-  /// [_capacity] is the maximum number of entries the cache can hold.
-  /// [gcInterval] is the interval for periodic garbage collection of expired entries.
-  /// If null, GC only happens on access or when adding new entries if capacity is hit.
-  LastSeenCache(this._ttl, this._capacity, {Duration? gcInterval}) {
-    if (gcInterval != null && gcInterval.inMilliseconds > 0) {
-      _gcTimer = Timer.periodic(gcInterval, (_) => _gc());
-    }
-  }
+  /// The expiry of each key, in the order of their expiries.
+  final LinkedHashMap<K, Duration> _expiries = LinkedHashMap<K, Duration>();
 
-  /// Adds or updates a key in the cache with the current timestamp.
-  ///
-  /// If the key already exists, its timestamp is updated to now, and it's
-  /// moved to the end of the LinkedHashMap (most recently seen).
-  void add(K key) {
-    final now = DateTime.now();
+  TimeCache._(this._ttl, MonotonicClock? clock) : _clock = clock ?? monotonicNow;
 
-    // If key exists, remove it first to re-add and update its position (most recent)
-    if (_entries.containsKey(key)) {
-      _entries.remove(key);
-    }
+  /// A cache whose keys expire [ttl] after they were first seen, or last
+  /// seen, as [strategy] says.
+  factory TimeCache(Duration ttl, {SeenMessagesStrategy strategy = SeenMessagesStrategy.firstSeen, MonotonicClock? clock}) =>
+      switch (strategy) {
+        SeenMessagesStrategy.firstSeen => FirstSeenCache<K>(ttl, clock: clock),
+        SeenMessagesStrategy.lastSeen => LastSeenCache<K>(ttl, clock: clock),
+      };
 
-    // Ensure capacity before adding
-    _ensureCapacity();
+  /// Adds [key]. Returns whether it was not in the cache.
+  bool add(K key);
 
-    _entries[key] = now;
-  }
+  /// Whether [key] is in the cache.
+  bool contains(K key);
 
-  /// Checks if a key is present in the cache and has not expired.
-  bool contains(K key) {
-    final entryTime = _entries[key];
-    if (entryTime == null) {
-      return false;
-    }
-    if (DateTime.now().difference(entryTime) > _ttl) {
-      _entries.remove(key); // Eagerly remove expired on access
-      return false;
-    }
+  bool _expired(K key, Duration now) {
+    final expiry = _expiries[key];
+    if (expiry == null) return true;
+    if (expiry > now) return false;
+    _expiries.remove(key);
     return true;
   }
 
-  /// Gets the timestamp for a key if it's present and not expired.
-  /// Returns null otherwise.
-  DateTime? get(K key) {
-    final entryTime = _entries[key];
-    if (entryTime == null) {
-      return null;
-    }
-    if (DateTime.now().difference(entryTime) > _ttl) {
-      _entries.remove(key); // Eagerly remove expired on access
-      return null;
-    }
-    return entryTime;
-  }
-  
-  /// Removes expired entries from the cache.
-  void _gc() {
-    final now = DateTime.now();
-    final List<K> toRemove = [];
-    _entries.forEach((key, timestamp) {
-      if (now.difference(timestamp) > _ttl) {
-        toRemove.add(key);
-      }
-    });
-    for (final key in toRemove) {
-      _entries.remove(key);
+  /// Removes the expired keys. They come first, as the keys are kept in the
+  /// order of their expiries.
+  void _sweep(Duration now) {
+    while (_expiries.isNotEmpty) {
+      final oldest = _expiries.keys.first;
+      if (_expiries[oldest]! > now) break;
+      _expiries.remove(oldest);
     }
   }
 
-  /// Ensures the cache does not exceed its capacity.
-  /// If over capacity, removes the oldest entries.
-  void _ensureCapacity() {
-    // Perform a GC pass first to clear out expired items
-    _gc();
-
-    // If still over capacity, remove oldest items (LinkedHashMap preserves insertion order)
-    while (_entries.length >= _capacity && _capacity > 0) {
-      if (_entries.isEmpty) break;
-      final keyToRemove = _entries.keys.first;
-      _entries.remove(keyToRemove);
-      // print('LastSeenCache: Evicted $keyToRemove due to capacity limit.');
-    }
+  /// Sets the expiry of [key] to [now] plus the TTL, the latest of all.
+  void _touch(K key, Duration now) {
+    _expiries.remove(key);
+    _expiries[key] = now + _ttl;
   }
 
-  /// Clears all entries from the cache.
-  void clear() {
-    _entries.clear();
+  /// The number of keys, expired ones not yet removed included.
+  int get length => _expiries.length;
+
+  /// Removes all keys.
+  void clear() => _expiries.clear();
+
+  /// Removes all keys. The cache can still be used.
+  void dispose() => clear();
+}
+
+/// A [TimeCache] whose keys expire their TTL after they were first seen, as
+/// go-libp2p-pubsub's `FirstSeenCache`.
+class FirstSeenCache<K> extends TimeCache<K> {
+  FirstSeenCache(Duration ttl, {MonotonicClock? clock}) : super._(ttl, clock);
+
+  @override
+  bool add(K key) {
+    final now = _clock();
+    _sweep(now);
+    if (!_expired(key, now)) return false;
+    _touch(key, now);
+    return true;
   }
 
-  /// Disposes of the cache, stopping any timers.
-  void dispose() {
-    _gcTimer?.cancel();
-    _gcTimer = null;
-    clear();
+  @override
+  bool contains(K key) => !_expired(key, _clock());
+}
+
+/// A [TimeCache] whose keys expire their TTL after they were last seen, as
+/// go-libp2p-pubsub's `LastSeenCache`: adding a key, or finding it with
+/// [contains], starts its TTL again.
+class LastSeenCache<K> extends TimeCache<K> {
+  LastSeenCache(Duration ttl, {MonotonicClock? clock}) : super._(ttl, clock);
+
+  @override
+  bool add(K key) {
+    final now = _clock();
+    _sweep(now);
+    final added = _expired(key, now);
+    _touch(key, now);
+    return added;
   }
 
-  int get length => _entries.length;
+  @override
+  bool contains(K key) {
+    final now = _clock();
+    if (_expired(key, now)) return false;
+    _touch(key, now);
+    return true;
+  }
 }
