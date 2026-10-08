@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:dart_libp2p/core/crypto/ed25519.dart';
 import 'package:dart_libp2p/core/peer/peer_id.dart';
 import 'package:dart_libp2p_pubsub/dart_libp2p_pubsub.dart';
+import 'package:dart_libp2p_pubsub/src/pb/rpc.pb.dart' as pb;
 import 'package:test/test.dart';
 
 import 'message_propagation_test.dart' show MockHost, MockNetwork, TestNetworkManager;
@@ -76,11 +77,42 @@ void main() {
     expect(g.received.map((m) => String.fromCharCodes(m.data)), ['from gossipsub', 'from floodsub']);
   });
 
-  test('two GossipSub nodes negotiate /meshsub/1.2.0', () async {
+  test('two GossipSub nodes negotiate /meshsub/1.3.0', () async {
     final a = await node(GossipSubRouter());
     final b = await node(GossipSubRouter());
     await startAll();
-    expect(a.pubsub.comms.protocolOf(b.id), gossipSubIDv12);
+    expect(a.pubsub.comms.protocolOf(b.id), gossipSubIDv13);
+    expect(a.router is GossipSubRouter && (a.router as GossipSubRouter).extensions.of(b.id) != null, isTrue,
+        reason: 'B sent its first RPC');
+  });
+
+  test('GossipSub v1.3: peers with the test extension exchange TestExtension messages, as go-libp2p-pubsub', () async {
+    final got = <String, List<PeerId>>{'a': [], 'b': [], 'c': []};
+    final a = await node(GossipSubRouter(
+        testExtension: TestExtensionConfig(onReceiveTestExtension: (p) => got['a']!.add(p))));
+    final b = await node(GossipSubRouter(
+        testExtension: TestExtensionConfig(onReceiveTestExtension: (p) => got['b']!.add(p))));
+    final c = await node(GossipSubRouter()); // Without the extension.
+    await startAll();
+    expect(got['a'], [b.id]);
+    expect(got['b'], [a.id]);
+    final ra = a.router as GossipSubRouter;
+    expect(ra.extensions.of(b.id)?.testExtension, isTrue);
+    expect(ra.extensions.of(c.id)?.testExtension, isFalse);
+  });
+
+  test('GossipSub v1.3: a peer that announces its extensions twice is penalised, as go-libp2p-pubsub', () async {
+    final a = await node(GossipSubRouter(
+      scoreParams: const PeerScoreParams(behaviourPenaltyWeight: -1, behaviourPenaltyDecay: 0.99),
+      scoreThresholds: const PeerScoreThresholds(gossipThreshold: -10, publishThreshold: -50, graylistThreshold: -80),
+    ));
+    final b = await node(GossipSubRouter());
+    await startAll();
+    final ra = a.router as GossipSubRouter;
+    expect(ra.extensions.of(b.id), isNotNull);
+    expect(ra.score!.snapshot(b.id)!.behaviourPenalty, 0);
+    await ra.handleRpc(b.id, pb.RPC()..ensureControl().extensions = pb.ControlExtensions());
+    expect(ra.score!.snapshot(b.id)!.behaviourPenalty, 10);
   });
 
   test('FloodSub does not loop messages in a cycle, and each node gets each message once', () async {

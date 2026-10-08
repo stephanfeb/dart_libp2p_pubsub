@@ -19,6 +19,7 @@ final _log = Logger('PubSubComm');
 const String gossipSubIDv10 = '/meshsub/1.0.0';
 const String gossipSubIDv11 = '/meshsub/1.1.0';
 const String gossipSubIDv12 = '/meshsub/1.2.0';
+const String gossipSubIDv13 = '/meshsub/1.3.0';
 const String floodSubID = '/floodsub/1.0.0';
 const String randomSubID = '/randomsub/1.0.0';
 
@@ -35,6 +36,9 @@ class _PersistentStream {
   }) : createdAt = DateTime.now();
 
   bool get isClosed => _isClosed || stream.isClosed;
+
+  /// Whether an RPC was written on the stream, or is being written.
+  bool firstRpcSent = false;
 
   /// The end of the chain of writes on this stream.
   Future<void> _lastWrite = Future.value();
@@ -100,6 +104,12 @@ class PubSubProtocol {
   /// Called when a peer ends our stream to it, as go-libp2p-pubsub's
   /// `handlePeerDead`: the peer stopped its pubsub, or the stream failed.
   void Function(PeerId peerId)? onPeerDead;
+
+  /// Called with the first RPC written on each new outbound stream and the
+  /// stream's protocol; the RPC it returns is written instead. GossipSub
+  /// v1.3 adds its extensions to the first RPC this way, as
+  /// go-libp2p-pubsub does to the hello packet.
+  pb.RPC Function(PeerId peerId, String protocol, pb.RPC rpc)? onFirstRpc;
 
   /// Map of persistent outbound streams per peer
   final Map<PeerId, _PersistentStream> _outboundStreams = {};
@@ -378,8 +388,16 @@ class PubSubProtocol {
           throw StateError('Stream to $peerId not writable after retry');
         }
 
+        var toSend = rpc;
+        if (!persistentStream.firstRpcSent) {
+          // Set before any await, so that only this RPC goes first; writes
+          // are made in the order they are started.
+          persistentStream.firstRpcSent = true;
+          toSend = onFirstRpc?.call(peerId, persistentStream.stream.protocol(), rpc) ?? rpc;
+        }
+
         // Encode with varint length prefix (matches go-libp2p-pubsub msgio framing)
-        final msgBytes = rpc.writeToBuffer();
+        final msgBytes = toSend.writeToBuffer();
         if (msgBytes.length > maxMessageSize) {
           // A peer would reset the stream on this frame. Callers split large
           // RPCs with splitRpc first.

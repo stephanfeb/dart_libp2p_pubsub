@@ -249,9 +249,11 @@ class PubSub {
         _log.fine('PubSub: Ignoring RPC from ${peerId.toBase58()}, refused by the router.');
         return;
       case AcceptStatus.control:
-        rpc = pb.RPC()
+        final controlOnly = pb.RPC()
           ..subscriptions.addAll(rpc.subscriptions)
           ..control = rpc.control;
+        if (rpc.hasTestExtension()) controlOnly.testExtension = rpc.testExtension;
+        rpc = controlOnly;
       case AcceptStatus.all:
         // As go-libp2p-pubsub: messages for topics we do not subscribe to
         // are ignored, before validation.
@@ -260,6 +262,7 @@ class PubSub {
             ..subscriptions.addAll(rpc.subscriptions)
             ..publish.addAll(rpc.publish.where((m) => _subscriptions.containsKey(m.topic)));
           if (rpc.hasControl()) filtered.control = rpc.control;
+          if (rpc.hasTestExtension()) filtered.testExtension = rpc.testExtension;
           _log.fine('PubSub: Ignoring ${rpc.publish.length - filtered.publish.length} messages from '
               '${peerId.toBase58()} for topics we do not subscribe to.');
           rpc = filtered;

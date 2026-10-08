@@ -917,6 +917,21 @@ class MockPubSubProtocol extends _i1.Mock implements _i13.PubSubProtocol {
       );
 
   @override
+  set onFirstRpc(
+          _i26.RPC Function(
+            _i2.PeerId,
+            String,
+            _i26.RPC,
+          )? _onFirstRpc) =>
+      super.noSuchMethod(
+        Invocation.setter(
+          #onFirstRpc,
+          _onFirstRpc,
+        ),
+        returnValueForMissingStub: null,
+      );
+
+  @override
   List<String> get protocols => (super.noSuchMethod(
         Invocation.getter(#protocols),
         returnValue: <String>[],

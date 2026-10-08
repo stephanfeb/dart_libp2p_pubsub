@@ -31,6 +31,12 @@ All notable changes to this project will be documented in this file.
 - `seenMessagesStrategy` (`GossipSubParams`, `FloodSubRouter`, `RandomSubRouter`) chooses Go's first-seen (default) or last-seen expiry, as `WithSeenMessagesStrategy`.
 - Removed `lib/src/util/backoff.dart`, which nothing used and was not exported.
 
+### GossipSub v1.3
+- **`GossipSubRouter` speaks `/meshsub/1.3.0`** (`gossipSubIDv13`), first, as go-libp2p-pubsub v0.15.0, and negotiates it with Go nodes. With a v1.3 peer, each side announces its extensions in its first RPC; a peer that announces them again gets a behaviour penalty of 10, as in Go. v1.3 peers get IDONTWANT and PX as v1.2 peers.
+- The experimental test extension, as Go's `WithTestExtension`: `GossipSubRouter(testExtension: TestExtensionConfig(...))`. Unlike Go, the callback runs only for RPCs that carry a `TestExtension` message.
+- The protobuf gains `ControlMessage.extensions`, `ControlExtensions` and `RPC.testExtension`, encoded as Go encodes them.
+- `PubSubProtocol.onFirstRpc` lets a router rewrite the first RPC on each new stream.
+
 ### Tests
 - Peer Exchange is tested on a real network: peers pruned by a bootstrapper with PX connect to each other, build a mesh and exchange messages. The test stores the signed peer records in the bootstrapper's address book itself, as dart_libp2p 4.0.1's identify does not.
 

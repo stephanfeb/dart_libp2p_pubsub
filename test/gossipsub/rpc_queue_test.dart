@@ -110,6 +110,9 @@ class MockPubSubProtocol implements PubSubProtocol {
   void Function(PeerId peerId)? onPeerDead;
 
   @override
+  pb.RPC Function(PeerId peerId, String protocol, pb.RPC rpc)? onFirstRpc;
+
+  @override
   int maxMessageSize = 1 << 20;
 
   @override

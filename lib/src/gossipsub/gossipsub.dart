@@ -26,6 +26,7 @@ import 'mcache.dart';
 import 'score.dart';
 import 'score_params.dart';
 import 'peer_gater.dart';
+import 'extensions.dart';
 import '../pb/trace.pb.dart' as trace_pb;
 import '../util/midgen.dart';
 import '../util/timecache.dart';
@@ -247,6 +248,18 @@ class GossipSubRouter implements Router {
   PeerGater? get gate => _gate;
   PeerGater? _gate;
 
+  /// The GossipSub v1.3 extensions exchanged with each peer.
+  late final ExtensionsState extensions = ExtensionsState(
+    testExtension: testExtension,
+    // As go-libp2p-pubsub: announcing extensions twice is penalised.
+    reportMisbehavior: (peer) => _score?.addPenalty(peer, 10),
+    sendRpc: (peer, rpc) => _sendRpc(peer, rpc),
+  );
+
+  /// Turns on the experimental test extension of GossipSub v1.3, as
+  /// go-libp2p-pubsub's `WithTestExtension`; off by default.
+  final TestExtensionConfig? testExtension;
+
   RpcOutgoingQueueManager? _rpcQueueManagerOrNull;
   late final MessageCache _mcache;
 
@@ -321,7 +334,7 @@ class GossipSubRouter implements Router {
 
   /// The protocols of GossipSub, in order of preference, as
   /// go-libp2p-pubsub's `GossipSubDefaultProtocols` (without v1.3).
-  static const List<String> defaultProtocols = [gossipSubIDv12, gossipSubIDv11, gossipSubIDv10, floodSubID];
+  static const List<String> defaultProtocols = [gossipSubIDv13, gossipSubIDv12, gossipSubIDv11, gossipSubIDv10, floodSubID];
 
   @override
   List<String> get protocols => defaultProtocols;
@@ -336,11 +349,14 @@ class GossipSubRouter implements Router {
   /// Whether [peer] takes Peer Exchange and backoff in PRUNEs (v1.1+).
   bool _supportsPX(PeerId peer) {
     final protocol = _protocolOf(peer);
-    return protocol == gossipSubIDv11 || protocol == gossipSubIDv12;
+    return protocol == gossipSubIDv11 || protocol == gossipSubIDv12 || protocol == gossipSubIDv13;
   }
 
   /// Whether [peer] speaks IDONTWANT (v1.2).
-  bool _supportsIDontWant(PeerId peer) => _protocolOf(peer) == gossipSubIDv12;
+  bool _supportsIDontWant(PeerId peer) {
+    final protocol = _protocolOf(peer);
+    return protocol == gossipSubIDv12 || protocol == gossipSubIDv13;
+  }
 
   /// Returns true if the router has been started and the heartbeat is active.
   bool get isStarted => _heartbeatTimer != null;
@@ -351,6 +367,7 @@ class GossipSubRouter implements Router {
     PeerScoreThresholds? scoreThresholds,
     this.doPX = false,
     this.peerGaterParams,
+    this.testExtension,
   })  : _scoreParams = scoreParams,
         thresholds = scoreThresholds ?? const PeerScoreThresholds() {
     if ((scoreParams == null) != (scoreThresholds == null)) {
@@ -376,6 +393,9 @@ class GossipSubRouter implements Router {
   Future<void> attach(PubSub pubsub) async {
     _pubsub = pubsub;
     _rpcQueueManagerOrNull = RpcOutgoingQueueManager(pubsub.comms, gossipSubIDv11);
+    // As go-libp2p-pubsub, a v1.3 peer gets our extensions in our first RPC.
+    pubsub.comms.onFirstRpc = (peer, protocol, rpc) =>
+        protocol == gossipSubIDv13 ? extensions.firstRpc(peer, rpc) : rpc;
     final scoreParams = _scoreParams;
     if (scoreParams != null) {
       _score = PeerScore(scoreParams, connectionIps: _connectionIps);
@@ -464,6 +484,7 @@ class GossipSubRouter implements Router {
     _unwanted.remove(peerId);
     _peerDontWant.remove(peerId);
     _signedRecords.remove(peerId);
+    extensions.removePeer(peerId);
     _score?.removePeer(peerId);
     _rpcQueueManagerOrNull?.peerDisconnected(peerId);
     _pubsub?.host.connManager.unprotect(peerId, 'gossipsub-mesh');
@@ -473,6 +494,7 @@ class GossipSubRouter implements Router {
   Future<Set<String>> handleRpc(PeerId peerId, pb.RPC rpc) async {
     final Set<String> acceptedMessageIds = {};
     _log.fine('GossipSubRouter: Handling RPC from ${peerId.toBase58()} for ${rpc.toShortString()}');
+    extensions.handleRpc(peerId, rpc);
     if (_pubsub?.tracing ?? false) {
       _pubsub!.traceEvent(trace_pb.TraceEvent()
         ..type = trace_pb.TraceEvent_Type.RECV_RPC

@@ -76,6 +76,7 @@ class RPC extends $pb.GeneratedMessage {
     ..pc<RPC_SubOpts>(1, _omitFieldNames ? '' : 'subscriptions', $pb.PbFieldType.PM, subBuilder: RPC_SubOpts.create)
     ..pc<Message>(2, _omitFieldNames ? '' : 'publish', $pb.PbFieldType.PM, subBuilder: Message.create)
     ..aOM<ControlMessage>(3, _omitFieldNames ? '' : 'control', subBuilder: ControlMessage.create)
+    ..aOM<TestExtension>(6492434, _omitFieldNames ? '' : 'testExtension', protoName: 'testExtension', subBuilder: TestExtension.create)
     ..hasRequiredFields = false
   ;
 
@@ -116,6 +117,20 @@ class RPC extends $pb.GeneratedMessage {
   void clearControl() => clearField(3);
   @$pb.TagNumber(3)
   ControlMessage ensureControl() => $_ensure(2);
+
+  /// Experimental Extensions should register their messages here. They
+  /// must use field numbers larger than 0x200000 to be encoded with at least 4
+  /// bytes
+  @$pb.TagNumber(6492434)
+  TestExtension get testExtension => $_getN(3);
+  @$pb.TagNumber(6492434)
+  set testExtension(TestExtension v) { setField(6492434, v); }
+  @$pb.TagNumber(6492434)
+  $core.bool hasTestExtension() => $_has(3);
+  @$pb.TagNumber(6492434)
+  void clearTestExtension() => clearField(6492434);
+  @$pb.TagNumber(6492434)
+  TestExtension ensureTestExtension() => $_ensure(3);
 }
 
 class Message extends $pb.GeneratedMessage {
@@ -222,6 +237,7 @@ class ControlMessage extends $pb.GeneratedMessage {
     ..pc<ControlGraft>(3, _omitFieldNames ? '' : 'graft', $pb.PbFieldType.PM, subBuilder: ControlGraft.create)
     ..pc<ControlPrune>(4, _omitFieldNames ? '' : 'prune', $pb.PbFieldType.PM, subBuilder: ControlPrune.create)
     ..pc<ControlIDontWant>(5, _omitFieldNames ? '' : 'idontwant', $pb.PbFieldType.PM, subBuilder: ControlIDontWant.create)
+    ..aOM<ControlExtensions>(6, _omitFieldNames ? '' : 'extensions', subBuilder: ControlExtensions.create)
     ..hasRequiredFields = false
   ;
 
@@ -260,6 +276,17 @@ class ControlMessage extends $pb.GeneratedMessage {
 
   @$pb.TagNumber(5)
   $core.List<ControlIDontWant> get idontwant => $_getList(4);
+
+  @$pb.TagNumber(6)
+  ControlExtensions get extensions => $_getN(5);
+  @$pb.TagNumber(6)
+  set extensions(ControlExtensions v) { setField(6, v); }
+  @$pb.TagNumber(6)
+  $core.bool hasExtensions() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearExtensions() => clearField(6);
+  @$pb.TagNumber(6)
+  ControlExtensions ensureExtensions() => $_ensure(5);
 }
 
 class ControlIHave extends $pb.GeneratedMessage {
@@ -478,6 +505,50 @@ class ControlIDontWant extends $pb.GeneratedMessage {
   $core.List<$core.List<$core.int>> get messageIDs => $_getList(0);
 }
 
+class ControlExtensions extends $pb.GeneratedMessage {
+  factory ControlExtensions() => create();
+  ControlExtensions._() : super();
+  factory ControlExtensions.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory ControlExtensions.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'ControlExtensions', package: const $pb.PackageName(_omitMessageNames ? '' : 'pubsub.pb'), createEmptyInstance: create)
+    ..aOB(6492434, _omitFieldNames ? '' : 'testExtension', protoName: 'testExtension')
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  ControlExtensions clone() => ControlExtensions()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  ControlExtensions copyWith(void Function(ControlExtensions) updates) => super.copyWith((message) => updates(message as ControlExtensions)) as ControlExtensions;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ControlExtensions create() => ControlExtensions._();
+  ControlExtensions createEmptyInstance() => create();
+  static $pb.PbList<ControlExtensions> createRepeated() => $pb.PbList<ControlExtensions>();
+  @$core.pragma('dart2js:noInline')
+  static ControlExtensions getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ControlExtensions>(create);
+  static ControlExtensions? _defaultInstance;
+
+  /// Experimental extensions must use field numbers larger than 0x200000 to be
+  /// encoded with 4 bytes
+  @$pb.TagNumber(6492434)
+  $core.bool get testExtension => $_getBF(0);
+  @$pb.TagNumber(6492434)
+  set testExtension($core.bool v) { $_setBool(0, v); }
+  @$pb.TagNumber(6492434)
+  $core.bool hasTestExtension() => $_has(0);
+  @$pb.TagNumber(6492434)
+  void clearTestExtension() => clearField(6492434);
+}
+
 class PeerInfo extends $pb.GeneratedMessage {
   factory PeerInfo() => create();
   PeerInfo._() : super();
@@ -528,6 +599,38 @@ class PeerInfo extends $pb.GeneratedMessage {
   $core.bool hasSignedPeerRecord() => $_has(1);
   @$pb.TagNumber(2)
   void clearSignedPeerRecord() => clearField(2);
+}
+
+class TestExtension extends $pb.GeneratedMessage {
+  factory TestExtension() => create();
+  TestExtension._() : super();
+  factory TestExtension.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory TestExtension.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'TestExtension', package: const $pb.PackageName(_omitMessageNames ? '' : 'pubsub.pb'), createEmptyInstance: create)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  TestExtension clone() => TestExtension()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  TestExtension copyWith(void Function(TestExtension) updates) => super.copyWith((message) => updates(message as TestExtension)) as TestExtension;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static TestExtension create() => TestExtension._();
+  TestExtension createEmptyInstance() => create();
+  static $pb.PbList<TestExtension> createRepeated() => $pb.PbList<TestExtension>();
+  @$core.pragma('dart2js:noInline')
+  static TestExtension getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<TestExtension>(create);
+  static TestExtension? _defaultInstance;
 }
 
 

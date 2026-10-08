@@ -90,7 +90,9 @@ The defaults are go-libp2p-pubsub's.
 
 ### Protocols
 
-`GossipSubRouter` speaks `/meshsub/1.2.0`, `/meshsub/1.1.0`, `/meshsub/1.0.0` and `/floodsub/1.0.0`, in that order of preference, and uses the features of the protocol negotiated with each peer. FloodSub peers get every message of their topics. `FloodSubRouter` and `RandomSubRouter` are also available.
+`GossipSubRouter` speaks `/meshsub/1.3.0`, `/meshsub/1.2.0`, `/meshsub/1.1.0`, `/meshsub/1.0.0` and `/floodsub/1.0.0`, in that order of preference, and uses the features of the protocol negotiated with each peer. FloodSub peers get every message of their topics. `FloodSubRouter` and `RandomSubRouter` are also available.
+
+With a v1.3 peer, each side announces its extensions in its first RPC, as go-libp2p-pubsub does; announcing them again costs a behaviour penalty of 10. No canonical extension exists yet. The experimental test extension is turned on with `GossipSubRouter(testExtension: TestExtensionConfig(onReceiveTestExtension: ...))`, as Go's `WithTestExtension`; `router.extensions.of(peer)` tells what a peer announced.
 
 ### Message Validation
 
