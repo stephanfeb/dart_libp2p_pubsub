@@ -31,6 +31,9 @@ All notable changes to this project will be documented in this file.
 - `seenMessagesStrategy` (`GossipSubParams`, `FloodSubRouter`, `RandomSubRouter`) chooses Go's first-seen (default) or last-seen expiry, as `WithSeenMessagesStrategy`.
 - Removed `lib/src/util/backoff.dart`, which nothing used and was not exported.
 
+### Tests
+- Peer Exchange is tested on a real network: peers pruned by a bootstrapper with PX connect to each other, build a mesh and exchange messages. The test stores the signed peer records in the bootstrapper's address book itself, as dart_libp2p 4.0.1's identify does not.
+
 ## 2.0.0 - 2026-10-08
 
 A review against go-libp2p-pubsub v0.15.0 found remote denial-of-service holes, a crash, interop bugs and a peer-scoring model that did not work. This release fixes them and aligns the router with Go.
