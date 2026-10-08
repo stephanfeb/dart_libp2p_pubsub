@@ -19,6 +19,15 @@ enum AcceptStatus {
   none,
 }
 
+/// Whether [router] is ready to publish on [topic], as go-libp2p-pubsub's
+/// `RouterReady`. See [PubSub.publish].
+typedef RouterReady = bool Function(Router router, String topic);
+
+/// Ready when the router has [size] peers on the topic, as
+/// go-libp2p-pubsub's `MinTopicSize`: see [Router.enoughPeers]. The router
+/// decides, and the local node is not counted.
+RouterReady minTopicSize(int size) => (router, topic) => router.enoughPeers(topic, size);
+
 /// Interface for a PubSub message router.
 ///
 /// A router is responsible for the actual logic of how messages are propagated
@@ -48,6 +57,12 @@ abstract class Router {
 
   /// Notifies the router that a peer has been disconnected.
   Future<void> removePeer(PeerId peerId);
+
+  /// Whether the router has enough peers on [topic], as go-libp2p-pubsub's
+  /// `Router.EnoughPeers`. [suggested] is the number of peers wanted; 0
+  /// means the router's own number. Discovery looks for more peers on the
+  /// topics that do not have enough.
+  bool enoughPeers(String topic, int suggested);
 
   /// Which parts of the RPCs of [peer] to handle, as go-libp2p-pubsub's
   /// `Router.AcceptFrom`. GossipSub ignores the RPCs of graylisted peers.

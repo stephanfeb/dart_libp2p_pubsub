@@ -55,7 +55,7 @@ subscription.stream.listen(
 GossipSub operates on top of the libp2p Host's network connections. It does not establish connections itself.
 
 **Best Practice**:
-*   **Manage Connections Separately**: Your application is responsible for finding and connecting to other peers. Use a discovery mechanism (like Kademlia DHT, not included in this library) or a bootstrap list to find peers, and then use `host.connect()` to establish a connection.
+*   **Manage Connections Separately**: Your application is responsible for connecting to its first peers, with a bootstrap list and `host.connect()`. To find the peers of your topics, give `PubSub` a discovery service (`PubSub(discovery: ...)`, for example a Kademlia DHT); see [Discovery](./5_configuration.md#discovery).
 *   **Monitor Connection Status**: Be aware of peer connection and disconnection events to understand the state of your network.
 
 **Pitfall**:

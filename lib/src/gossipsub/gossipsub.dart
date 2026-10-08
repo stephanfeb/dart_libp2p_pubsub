@@ -384,6 +384,18 @@ class GossipSubRouter implements Router {
     _log.fine('GossipSubRouter detached.');
   }
 
+  /// As go-libp2p-pubsub: enough when the topic's FloodSub peers and mesh
+  /// peers number [suggested], or `DLo` if 0, or the mesh has `DHi` peers.
+  @override
+  bool enoughPeers(String topic, int suggested) {
+    final topicPeers = _connectedPeers().where((p) => _peerTopics[p]?.contains(topic) ?? false).toList();
+    if (topicPeers.isEmpty) return false;
+    final floodPeers = topicPeers.where((p) => _peerProtocols[p] == floodSubID).length;
+    final meshPeers = mesh[topic]?.length ?? 0;
+    if (suggested == 0) suggested = params.DLow;
+    return floodPeers + meshPeers >= suggested || meshPeers >= params.DHigh;
+  }
+
   @override
   AcceptStatus acceptFrom(PeerId peer) {
     // As go-libp2p-pubsub: the RPCs of a graylisted peer are ignored.

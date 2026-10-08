@@ -23,6 +23,10 @@ class RandomSubRouter extends FloodSubRouter {
   @override
   List<String> get protocols => const [randomSubID, floodSubID];
 
+  /// As go-libp2p-pubsub: [enoughPeers] wants [randomSubD] peers by default.
+  @override
+  int get topicSearchSize => randomSubD;
+
   @override
   Iterable<PeerId> selectPeers(String topic, List<PeerId> candidates) {
     final flood = candidates.where((p) => peerProtocols[p] == floodSubID).toList();

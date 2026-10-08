@@ -296,6 +296,9 @@ class MockHost implements Host {
 
 // A simple mock Router
 class MockRouter implements Router {
+  @override
+  bool enoughPeers(String topic, int suggested) => false;
+
   PubSub? attachedPubSub;
   List<String> joinedTopics = [];
   List<PubSubMessage> publishedMessages = [];

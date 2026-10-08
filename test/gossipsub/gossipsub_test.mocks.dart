@@ -632,8 +632,10 @@ class MockPubSub extends _i1.Mock implements _i23.PubSub {
   @override
   _i20.Future<void> publish(
     String? topic,
-    _i31.Uint8List? data,
-  ) =>
+    _i31.Uint8List? data, {
+    _i10.RouterReady? ready,
+    Duration? readyTimeout,
+  }) =>
       (super.noSuchMethod(
         Invocation.method(
           #publish,
@@ -641,6 +643,10 @@ class MockPubSub extends _i1.Mock implements _i23.PubSub {
             topic,
             data,
           ],
+          {
+            #ready: ready,
+            #readyTimeout: readyTimeout,
+          },
         ),
         returnValue: _i20.Future<void>.value(),
         returnValueForMissingStub: _i20.Future<void>.value(),

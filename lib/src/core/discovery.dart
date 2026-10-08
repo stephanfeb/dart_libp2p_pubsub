@@ -1,141 +1,182 @@
 import 'dart:async';
+import 'dart:math';
 
-// Assuming Discovery, AddrInfo, PeerId are from dart_libp2p package
-// and DiscoveryOption might be part of it or defined elsewhere if needed.
-// For now, assuming DiscoveryOption is not strictly needed for basic advertise/findPeers.
-import 'package:dart_libp2p/core/discovery.dart'; // For Discovery interface
-import 'package:dart_libp2p/core/peer/addr_info.dart'; // For AddrInfo
-import 'package:dart_libp2p/core/peer/peer_id.dart';   // For PeerId
+import 'package:dart_libp2p/core/discovery.dart';
+import 'package:dart_libp2p/core/host/host.dart';
+import 'package:dart_libp2p/core/peer/addr_info.dart';
+import 'package:dart_libp2p/p2p/discovery/backoff/backoff.dart';
+import 'package:dart_libp2p/p2p/discovery/backoff/backoff_connector.dart';
 import 'package:logging/logging.dart';
+
+import 'router.dart';
 
 final _log = Logger('PubSubDiscovery');
 
-// Callback for when a new peer relevant to PubSub is discovered.
-typedef PubSubPeerDiscoveredCallback = void Function(PeerId peerId, String? context); // Added context
+/// The prefix of the discovery namespace of a topic, as go-libp2p-pubsub's:
+/// a topic is advertised and looked up as `floodsub:<topic>`, whatever the
+/// router.
+const String discoveryNamespacePrefix = 'floodsub:';
 
-/// A default service tag for general PubSub node discovery.
-const String DEFAULT_GENERAL_PUBSUB_SERVICE_TAG = "/libp2p/pubsub/gossipsub/1.1.0/discovery";
+/// How often discovery checks the subscribed topics for peers (Go's
+/// `DiscoveryPollInterval`).
+const Duration discoveryPollInterval = Duration(seconds: 1);
 
-/// Prefix for creating discovery namespaces for specific topics.
-const String TOPIC_DISCOVERY_PREFIX = "gossipsub_topic:";
+/// How long to wait before advertising again after an advertisement fails
+/// (Go's `discoveryAdvertiseRetryInterval`).
+const Duration discoveryAdvertiseRetryInterval = Duration(minutes: 2);
 
-/// Handles PubSub-specific peer discovery aspects by leveraging a libp2p Discovery service.
+/// How long one search for the peers of a topic lasts (Go: 10 s).
+const Duration discoveryFindPeersTimeout = Duration(seconds: 10);
+
+/// Creates the connector that dials the peers discovery finds.
+typedef DiscoveryConnectorFactory = BackoffConnector Function(Host host);
+
+/// go-libp2p-pubsub's default connector: an exponential backoff of 10 s to
+/// 1 hour between attempts at a peer, for up to 100 peers, and dials of up to
+/// 2 minutes.
+BackoffConnector defaultDiscoveryConnector(Host host) => BackoffConnector(
+      host,
+      100,
+      const Duration(minutes: 2),
+      newExponentialBackoff(const Duration(seconds: 10), const Duration(hours: 1), fullJitter,
+          const Duration(seconds: 1), 5.0, Duration.zero, Random()),
+    );
+
+/// The discovery pipeline of PubSub, as go-libp2p-pubsub's `discover`:
+/// advertises the topics the node subscribes to, looks for peers of the
+/// subscribed topics that the router has not enough peers on, and connects
+/// to the peers it finds.
 class PubSubDiscovery {
-  final Discovery _discoveryService;
-  final String? generalServiceTag;
+  final Discovery _discovery;
+  final List<DiscoveryOption> _options;
+  final DiscoveryConnectorFactory _connectorFactory;
 
-  final List<PubSubPeerDiscoveredCallback> _discoveryCallbacks = [];
-  
-  StreamSubscription<AddrInfo>? _generalServiceSubscription;
-  final Map<String, StreamSubscription<AddrInfo>> _topicPeerSubscriptions = {};
-  // We might need to manage advertisement TTLs and re-advertise, but that's for future enhancement.
-  // final Map<String, Timer> _advertisementTimers = {}; // For re-advertising
+  BackoffConnector? _connector;
+  Router? _router;
+  Iterable<String> Function()? _topics;
+  Timer? _poll;
+  bool _running = false;
 
-  /// Creates a PubSubDiscovery instance.
-  ///
-  /// [_discoveryService]: The underlying libp2p Discovery service (e.g., IpfsDHT).
-  /// [generalServiceTag]: An optional namespace string for general PubSub service
-  /// advertisement. If null, `DEFAULT_GENERAL_PUBSUB_SERVICE_TAG` can be used by the caller
-  /// or general advertisement can be skipped.
-  PubSubDiscovery(this._discoveryService, {this.generalServiceTag});
+  /// The advertisement of each topic advertised.
+  final Map<String, _Advertisement> _advertising = {};
 
-  /// Starts general PubSub service discovery and advertisement if [generalServiceTag] is configured.
-  Future<void> start() async {
-    if (generalServiceTag != null && generalServiceTag!.isNotEmpty) {
-      try {
-        _log.fine('PubSubDiscovery: Advertising general service tag: $generalServiceTag');
-        // Advertise returns a Future<Duration> (TTL). We might need to re-advertise.
-        await _discoveryService.advertise(generalServiceTag!);
-        // TODO: Handle re-advertisement based on TTL.
+  /// The search under way for each topic.
+  final Map<String, Future<void>> _ongoing = {};
 
-        _log.fine('PubSubDiscovery: Finding peers for general service tag: $generalServiceTag');
-        final stream = await _discoveryService.findPeers(generalServiceTag!);
-        _generalServiceSubscription?.cancel(); // Cancel previous if any
-        _generalServiceSubscription = stream.listen(
-          (addrInfo) => _handleDiscoveredPeer(addrInfo, generalServiceTag),
-          onError: (e) => _log.warning('PubSubDiscovery: Error in general service peer stream: $e'),
-          onDone: () => _log.fine('PubSubDiscovery: General service peer stream closed.'),
-        );
-      } catch (e, s) {
-        _log.warning('PubSubDiscovery: Error during general service start: $e\nStack trace:\n$s');
-      }
+  /// Discovers peers with [discovery], passing it [options] on each call.
+  /// The peers found are dialed by the connector [connector] creates, by
+  /// default [defaultDiscoveryConnector].
+  PubSubDiscovery(Discovery discovery,
+      {List<DiscoveryOption> options = const [], DiscoveryConnectorFactory? connector})
+      : _discovery = discovery,
+        _options = options,
+        _connectorFactory = connector ?? defaultDiscoveryConnector;
+
+  /// Starts polling: every [discoveryPollInterval], each of [topics] on
+  /// which [router] has not enough peers is searched.
+  void start(Host host, Router router, Iterable<String> Function() topics) {
+    if (_running) return;
+    _running = true;
+    _connector ??= _connectorFactory(host);
+    _router = router;
+    _topics = topics;
+    _requestDiscovery();
+    _poll = Timer.periodic(discoveryPollInterval, (_) => _requestDiscovery());
+  }
+
+  /// Stops polling and advertising. Searches under way end within
+  /// [discoveryFindPeersTimeout].
+  void stop() {
+    _running = false;
+    _poll?.cancel();
+    _poll = null;
+    for (final ad in _advertising.values) {
+      ad.cancel();
+    }
+    _advertising.clear();
+  }
+
+  void _requestDiscovery() {
+    final router = _router;
+    if (router == null) return;
+    for (final topic in _topics!()) {
+      if (!router.enoughPeers(topic, 0)) discover(topic);
     }
   }
 
-  /// Starts finding peers for a specific topic and advertises interest in it.
-  Future<void> discoverTopic(String topic) async {
-    final topicNamespace = "$TOPIC_DISCOVERY_PREFIX$topic";
+  /// Searches for peers of [topic] and dials them, unless a search for the
+  /// topic is under way. Completes when the search ends.
+  Future<void> discover(String topic) {
+    if (!_running) return Future.value();
+    // The callback must not return the removed future, which whenComplete
+    // would wait for: itself.
+    return _ongoing[topic] ??= _handleDiscovery(topic).whenComplete(() {
+      _ongoing.remove(topic);
+    });
+  }
+
+  Future<void> _handleDiscovery(String topic) async {
+    final Stream<AddrInfo> found;
     try {
-      _log.fine('PubSubDiscovery: Advertising topic: $topicNamespace');
-      await _discoveryService.advertise(topicNamespace);
-      // TODO: Handle re-advertisement for topic.
-
-      _log.fine('PubSubDiscovery: Finding peers for topic: $topicNamespace');
-      final stream = await _discoveryService.findPeers(topicNamespace);
-      
-      // Cancel any existing subscription for this topic before starting a new one.
-      await _topicPeerSubscriptions[topicNamespace]?.cancel();
-      
-      _topicPeerSubscriptions[topicNamespace] = stream.listen(
-        (addrInfo) => _handleDiscoveredPeer(addrInfo, topicNamespace),
-        onError: (e) => _log.warning('PubSubDiscovery: Error in topic peer stream for $topicNamespace: $e'),
-        onDone: () {
-          _log.fine('PubSubDiscovery: Topic peer stream for $topicNamespace closed.');
-          _topicPeerSubscriptions.remove(topicNamespace);
-        },
-      );
-    } catch (e, s) {
-      _log.warning('PubSubDiscovery: Error during topic discovery for $topicNamespace: $e\nStack trace:\n$s');
+      found = await _discovery
+          .findPeers('$discoveryNamespacePrefix$topic', _options)
+          .timeout(discoveryFindPeersTimeout);
+    } catch (e) {
+      _log.fine('Error finding peers for topic $topic: $e');
+      return;
     }
-  }
-
-  /// Stops finding peers for a specific topic.
-  /// Note: This currently only stops listening for new peers. It does not "unadvertise".
-  Future<void> stopDiscoveringTopic(String topic) async {
-    final topicNamespace = "$TOPIC_DISCOVERY_PREFIX$topic";
-    final subscription = _topicPeerSubscriptions.remove(topicNamespace);
-    if (subscription != null) {
+    // As go-libp2p-pubsub, the search lasts at most 10 s.
+    final bounded = StreamController<AddrInfo>();
+    void close() {
+      if (!bounded.isClosed) bounded.close();
+    }
+    final subscription = found.listen(bounded.add, onError: (Object e) {
+      _log.fine('Error finding peers for topic $topic: $e');
+    }, onDone: close);
+    final timer = Timer(discoveryFindPeersTimeout, () {
+      subscription.cancel();
+      close();
+    });
+    try {
+      await _connector!.connect(bounded.stream);
+    } finally {
+      timer.cancel();
       await subscription.cancel();
-      _log.fine('PubSubDiscovery: Stopped discovering peers for topic: $topicNamespace');
-    }
-    // TODO: Implement unadvertising if the Discovery service supports it or manage advertisement TTLs.
-  }
-
-  void _handleDiscoveredPeer(AddrInfo addrInfo, String? discoveryContext) {
-    _log.fine('PubSubDiscovery: Discovered peer ${addrInfo.id.toBase58()} (context: $discoveryContext) with addrs: ${addrInfo.addrs}');
-    for (final callback in List<PubSubPeerDiscoveredCallback>.from(_discoveryCallbacks)) {
-      try {
-        callback(addrInfo.id, discoveryContext);
-      } catch (e, s) {
-        _log.warning('PubSubDiscovery: Error in discovery callback: $e\nStack trace:\n$s');
-      }
+      close();
     }
   }
 
-  /// Registers a callback to be invoked when a new PubSub peer is discovered.
-  void addDiscoveryListener(PubSubPeerDiscoveredCallback callback) {
-    if (!_discoveryCallbacks.contains(callback)) {
-      _discoveryCallbacks.add(callback);
-    }
+  /// Advertises [topic], again when the advertisement expires, until
+  /// [stopAdvertise] or [stop]. Does nothing if [topic] is advertised.
+  void advertise(String topic) {
+    if (!_running || _advertising.containsKey(topic)) return;
+    final ad = _Advertisement();
+    _advertising[topic] = ad;
+    _advertise(topic, ad);
   }
 
-  /// Unregisters a previously registered discovery callback.
-  void removeDiscoveryListener(PubSubPeerDiscoveredCallback callback) {
-    _discoveryCallbacks.remove(callback);
+  Future<void> _advertise(String topic, _Advertisement ad) async {
+    var next = Duration.zero;
+    try {
+      next = await _discovery.advertise('$discoveryNamespacePrefix$topic', _options);
+    } catch (e) {
+      _log.warning('Error advertising topic $topic: $e');
+    }
+    if (next <= Duration.zero) next = discoveryAdvertiseRetryInterval;
+    if (ad.cancelled) return;
+    ad.timer = Timer(next, () => _advertise(topic, ad));
   }
 
-  /// Cleans up resources, cancelling all active discovery operations.
-  Future<void> dispose() async {
-    _log.fine('PubSubDiscovery: Disposing...');
-    await _generalServiceSubscription?.cancel();
-    _generalServiceSubscription = null;
+  /// Stops advertising [topic].
+  void stopAdvertise(String topic) => _advertising.remove(topic)?.cancel();
+}
 
-    for (final subscription in _topicPeerSubscriptions.values) {
-      await subscription.cancel();
-    }
-    _topicPeerSubscriptions.clear();
-    _discoveryCallbacks.clear();
-    // TODO: Cancel any re-advertisement timers if implemented.
-    _log.fine('PubSubDiscovery: Disposed.');
+class _Advertisement {
+  bool cancelled = false;
+  Timer? timer;
+
+  void cancel() {
+    cancelled = true;
+    timer?.cancel();
   }
 }

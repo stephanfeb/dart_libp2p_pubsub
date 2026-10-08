@@ -184,4 +184,21 @@ void main() {
     expect(texts(b), ['from b']);
     expect(texts(a), ['from a'], reason: 'b no longer sends to a');
   });
+
+  test('enoughPeers counts the topic peers, against the router default when 0, as go-libp2p-pubsub', () async {
+    final f = await node(FloodSubRouter());
+    final r = await node(RandomSubRouter(networkSize: 10));
+    final g = await node(GossipSubRouter());
+    await startAll();
+
+    for (final n in [f, r, g]) {
+      expect(n.router.enoughPeers('other', 1), isFalse, reason: '${n.router}: no peer on the topic');
+      expect(n.router.enoughPeers(topic, 2), isTrue, reason: '${n.router}: two peers on the topic');
+      expect(n.router.enoughPeers(topic, 3), isFalse, reason: '${n.router}');
+    }
+    // Defaults: FloodSubTopicSearchSize (5), RandomSubD (6), DLow (6).
+    for (final n in [f, r, g]) {
+      expect(n.router.enoughPeers(topic, 0), isFalse, reason: '${n.router}');
+    }
+  });
 }

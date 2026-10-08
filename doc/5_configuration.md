@@ -104,6 +104,23 @@ See [Validating Messages](./2_gossipsub_usage.md#6-validating-messages).
 
 As go-libp2p-pubsub's `WithBlacklist`, `PubSub(blacklist: Blacklist())` takes the set of blacklisted peers (an empty one by default), and `pubsub.blacklistPeer(peerId)` adds a peer, removing it from the router if it is connected. A blacklisted peer is not added or greeted, its RPCs are ignored, and messages it forwards or wrote are dropped before validation.
 
+### Discovery
+
+As go-libp2p-pubsub's `WithDiscovery`, `PubSub(discovery: ...)` takes a dart_libp2p `Discovery` service (a DHT, mDNS, a rendezvous point...) to find the peers of your topics:
+
+-   Each subscribed topic is advertised under the namespace `floodsub:<topic>` (`discoveryNamespacePrefix`), the same as Go nodes use, and advertised again when the advertisement expires (or 2 minutes after a failure). The last unsubscription stops it.
+-   Every second (`discoveryPollInterval`), each subscribed topic on which the router has not enough peers (`Router.enoughPeers`: `DLow` for GossipSub, 5 for FloodSub, 6 for RandomSub) is looked up, for at most 10 seconds, and the peers found are dialed.
+-   `discoveryOptions` are passed to each call of the service (Go's `WithDiscoveryOpts`).
+-   `discoveryConnector` creates the connector that dials the peers found (Go's `WithDiscoverConnector`). The default, `defaultDiscoveryConnector`, is Go's: a dart_libp2p `BackoffConnector` that waits 10 seconds to 1 hour, growing, before dialing the same peer again, for up to 100 peers, with dials of up to 2 minutes.
+
+To wait for peers before publishing, as Go's `WithReadiness`, pass `ready`:
+
+```dart
+await pubsub.publish(topic, data, ready: minTopicSize(3), readyTimeout: Duration(seconds: 30));
+```
+
+The router decides when the topic is ready (`minTopicSize(n)` asks `enoughPeers(topic, n)`). While waiting, PubSub looks up peers of the topic if it has a discovery service. If `readyTimeout` passes first, the message is not published and a `TimeoutException` is thrown.
+
 ### Peer Scoring
 
 Peer scoring is off by default, as in go-libp2p-pubsub. Turn it on by giving the router both score parameters and thresholds (go-libp2p-pubsub's `WithPeerScore`):

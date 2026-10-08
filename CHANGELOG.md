@@ -10,6 +10,13 @@ All notable changes to this project will be documented in this file.
 - `RECV_RPC` events carry the summary of the RPC (`meta`), and the RPC summaries list the subscriptions, as in Go.
 - Tracing after `dispose()` no longer throws: the event is dropped. `stop()` and `dispose()` can be called again.
 
+### Discovery
+- **Topic discovery works, as go-libp2p-pubsub's `WithDiscovery`.** `PubSub(discovery: ...)` takes a dart_libp2p `Discovery` service. PubSub advertises each subscribed topic, every second looks up the peers of the subscribed topics that the router has not enough peers on, and dials them through a backoff connector (`discoveryConnector`, default Go's). `discoveryOptions` are passed to the service. Before, the discovery helper was not connected to `PubSub`.
+- **Topics are advertised under Go's namespace, `floodsub:<topic>`**, so Dart and Go nodes find each other. The helper used `gossipsub_topic:<topic>`.
+- `publish(topic, data, ready: minTopicSize(n), readyTimeout: ...)` waits until the router has enough peers on the topic before publishing, looking them up while it waits, as Go's `WithReadiness`.
+- **Breaking for custom routers:** `Router` has a new method, `enoughPeers(topic, suggested)`, as Go's `EnoughPeers`. The built-in routers implement it with Go's rules.
+- Removed `PubSubDiscovery`'s old API (`addDiscoveryListener`, `discoverTopic`, `DEFAULT_GENERAL_PUBSUB_SERVICE_TAG`, `TOPIC_DISCOVERY_PREFIX`). The class was not exported.
+
 ## 2.0.0 - 2026-10-08
 
 A review against go-libp2p-pubsub v0.15.0 found remote denial-of-service holes, a crash, interop bugs and a peer-scoring model that did not work. This release fixes them and aligns the router with Go.

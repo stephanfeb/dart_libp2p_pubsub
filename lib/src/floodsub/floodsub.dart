@@ -16,6 +16,10 @@ import '../util/timecache.dart';
 
 final _log = Logger('FloodSubRouter');
 
+/// The number of peers FloodSub wants on a topic before discovery stops
+/// looking for more (go-libp2p-pubsub's `FloodSubTopicSearchSize`).
+const int floodSubTopicSearchSize = 5;
+
 /// The FloodSub router, as go-libp2p-pubsub's `FloodSubRouter`: every
 /// message goes to every connected peer subscribed to its topic, except the
 /// peer it came from and its author.
@@ -124,6 +128,16 @@ class FloodSubRouter implements Router {
       _queue?.sendRpc(peerId, rpc);
     }
   }
+
+  /// The number of peers [enoughPeers] wants on a topic by default
+  /// (go-libp2p-pubsub's `FloodSubTopicSearchSize`).
+  int get topicSearchSize => floodSubTopicSearchSize;
+
+  /// As go-libp2p-pubsub: enough when [suggested] peers, or
+  /// [topicSearchSize] if 0, are subscribed to [topic].
+  @override
+  bool enoughPeers(String topic, int suggested) =>
+      topicPeers(topic).length >= (suggested == 0 ? topicSearchSize : suggested);
 
   /// The recipients of a message on [topic] among [candidates]: all of them.
   Iterable<PeerId> selectPeers(String topic, List<PeerId> candidates) => candidates;

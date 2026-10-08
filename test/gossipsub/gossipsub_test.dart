@@ -586,7 +586,7 @@ void main() {
         ) as trace_pb.TraceEvent?;
         expect(graftTrace, isNotNull, reason: "GRAFT trace not found");
         expect(graftTrace!.graft.topic, equals(testTopicName));
-        expect(graftTrace!.graft.peerID, equals(mockRpcPeerId.toBytes()));
+        expect(graftTrace.graft.peerID, equals(mockRpcPeerId.toBytes()));
       });
 
       test('handleRpc with PRUNE should remove peer from mesh and trace event', () async {
@@ -620,7 +620,7 @@ void main() {
         ) as trace_pb.TraceEvent?;
         expect(pruneTrace, isNotNull, reason: "PRUNE trace not found");
         expect(pruneTrace!.prune.topic, equals(testTopicName));
-        expect(pruneTrace!.prune.peerID, equals(mockRpcPeerId.toBytes()));
+        expect(pruneTrace.prune.peerID, equals(mockRpcPeerId.toBytes()));
       });
 
       test('handleRpc with a PRUNE asking for a huge backoff caps it instead of throwing', () async {

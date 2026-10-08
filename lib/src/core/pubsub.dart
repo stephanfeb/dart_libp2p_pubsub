@@ -6,6 +6,7 @@ import 'dart:typed_data'; // For Uint8List, ByteData, Endian
 import 'package:dart_libp2p/core/host/host.dart';
 import 'package:dart_libp2p/core/peer/peer_id.dart';
 import 'package:dart_libp2p/core/crypto/keys.dart'; // For PrivateKey
+import 'package:dart_libp2p/core/discovery.dart';
 import 'package:fixnum/fixnum.dart';
 import '../pb/rpc.pb.dart' as pb;
 
@@ -13,6 +14,7 @@ import 'subscription.dart';
 import 'router.dart';
 import 'notify.dart';
 import 'blacklist.dart';
+import 'discovery.dart';
 import 'topic.dart';
 import 'comm.dart';
 import 'message.dart'; // For PubSubMessage used in publish
@@ -138,6 +140,10 @@ class PubSub {
   final Blacklist blacklist;
 
   final PrivateKey? _privateKey; // For signing outgoing messages
+
+  /// Advertises and searches for the peers of our topics, when a
+  /// [Discovery] was given.
+  final PubSubDiscovery? _discovery;
   late final PubSubProtocol _comms;
 
   /// Sends our subscriptions to each peer that connects, and tells the router
@@ -181,6 +187,14 @@ class PubSub {
   /// [messageIdFn] computes message IDs, as go-libp2p-pubsub's
   /// `WithMessageIdFn` (default [defaultMessageIdFn], which is Go's
   /// `DefaultMsgIdFn`). All nodes of a network must use the same function.
+  ///
+  /// [discovery] finds peers for our topics, as go-libp2p-pubsub's
+  /// `WithDiscovery`: each subscribed topic is advertised under the
+  /// namespace `floodsub:<topic>`, and while the router has not enough
+  /// peers on a subscribed topic (see [Router.enoughPeers]) PubSub searches
+  /// for its peers and dials them, with the connector [discoveryConnector]
+  /// creates (default [defaultDiscoveryConnector]). [discoveryOptions] are
+  /// passed to each call of [discovery], as `WithDiscoveryOpts`.
   // TODO: Consider making PubSub an async initializable class if attach needs to be awaited.
   PubSub(this.host, this.router, {
     PrivateKey? privateKey,
@@ -192,6 +206,9 @@ class PubSub {
     MessageSignaturePolicy signaturePolicy = MessageSignaturePolicy.strictSign,
     this.noAuthor = false,
     Blacklist? blacklist,
+    Discovery? discovery,
+    List<DiscoveryOption> discoveryOptions = const [],
+    DiscoveryConnectorFactory? discoveryConnector,
   }) :
     blacklist = blacklist ?? Blacklist(),
     signaturePolicy = noAuthor && signaturePolicy.mustSign
@@ -199,6 +216,9 @@ class PubSub {
         : signaturePolicy,
     _messageIdFn = messageIdFn,
     _privateKey = privateKey,
+    _discovery = discovery == null
+        ? null
+        : PubSubDiscovery(discovery, options: discoveryOptions, connector: discoveryConnector),
     this.tracer = tracer ?? const NoOpEventTracer(),
     _idGenerator = MessageIdGenerator() { // Initialize the ID generator
     _comms = PubSubProtocol(host, _handleRpc, maxMessageSize: maxMessageSize, protocols: router.protocols);
@@ -281,6 +301,7 @@ class PubSub {
           // As in go-libp2p-pubsub: the last subscription to a topic
           // announces the unsubscription and leaves the topic's mesh.
           _subscriptions.remove(topic);
+          _discovery?.stopAdvertise(topic);
           _announceSubscription(topic, false);
           await router.leave(Topic(topic));
         }
@@ -289,6 +310,11 @@ class PubSub {
 
     subscription = Subscription(topic, cancelSubscriptionCallback);
     _subscriptions[topic]!.add(subscription);
+
+    // As go-libp2p-pubsub: look for peers of the topic, and advertise it on
+    // the first subscription.
+    _discovery?.discover(topic);
+    if (firstSubscription) _discovery?.advertise(topic);
 
     // Announce subscription to all connected GossipSub peers
     _announceSubscription(topic, true);
@@ -682,7 +708,16 @@ class PubSub {
   ///
   /// The data is validated, wrapped in a PubSubMessage, and then passed to the
   /// router for propagation.
-  Future<void> publish(String topic, Uint8List data) async {
+  ///
+  /// With [ready], waits first until the router is ready to publish on
+  /// [topic], as go-libp2p-pubsub's `WithReadiness`; for example
+  /// `ready: minTopicSize(3)`. While it waits, PubSub searches for peers of
+  /// the topic if it has a [Discovery]. If [readyTimeout] passes first, the
+  /// message is not published and a [TimeoutException] is thrown; if
+  /// PubSub stops first, a [StateError].
+  Future<void> publish(String topic, Uint8List data, {RouterReady? ready, Duration? readyTimeout}) async {
+    if (ready != null) await _waitUntilReady(topic, ready, readyTimeout);
+
     // Construct the pb.Message first
     // 'from' should be the local peer's ID.
     // 'seqno' should be generated (e.g., timestamp based or counter).
@@ -763,6 +798,29 @@ class PubSub {
     }
   }
 
+  /// Waits until [ready] holds for [topic], as go-libp2p-pubsub's
+  /// `Publish` with `WithReadiness`: checks every 100 ms and, with
+  /// discovery, searches for peers of the topic between checks.
+  Future<void> _waitUntilReady(String topic, RouterReady ready, Duration? timeout) async {
+    final deadline = timeout == null ? null : DateTime.now().add(timeout);
+    while (!ready(router, topic)) {
+      if (_stopped) throw StateError('PubSub stopped before topic $topic was ready');
+      var wait = const Duration(milliseconds: 100);
+      if (deadline != null) {
+        final left = deadline.difference(DateTime.now());
+        if (left <= Duration.zero) {
+          throw TimeoutException('Topic $topic was not ready to publish', timeout);
+        }
+        final search = _discovery?.discover(topic);
+        if (search != null) await search.timeout(left, onTimeout: () {});
+        if (left < wait) wait = left;
+      } else {
+        await _discovery?.discover(topic);
+      }
+      await Future.delayed(wait);
+    }
+  }
+
   /// Whether [stop] was called after the last [start].
   bool _stopped = false;
 
@@ -783,6 +841,13 @@ class PubSub {
       router.join(Topic(topic)).catchError((e, s) {
         _log.warning('PubSub: Error joining topic $topic: $e\n$s');
       });
+    }
+    final discovery = _discovery;
+    if (discovery != null) {
+      discovery.start(host, router, () => _subscriptions.keys.toList());
+      for (final topic in _subscriptions.keys) {
+        discovery.advertise(topic);
+      }
     }
     if (_peerNotifier == null) {
       _peerNotifier = PeerNotifier(host)
@@ -810,6 +875,7 @@ class PubSub {
   Future<void> stop() async {
     _log.fine('PubSub: Stopping...');
     _stopped = true;
+    _discovery?.stop();
     _peerNotifier?.dispose();
     _peerNotifier = null;
     for (final peerId in _peers.toList()) {
