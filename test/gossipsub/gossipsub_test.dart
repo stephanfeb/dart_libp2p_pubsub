@@ -158,6 +158,8 @@ void main() {
       when(mockPubsub.comms).thenReturn(mockComms);
       when(mockPubsub.messageIdFn).thenReturn(defaultMessageIdFn);
       when(mockPubsub.tracer).thenReturn(mockTracer);
+      when(mockPubsub.tracing).thenReturn(true);
+      when(mockPubsub.traceEvent(any)).thenAnswer((inv) => mockTracer.trace(inv.positionalArguments.first as trace_pb.TraceEvent));
       when(mockPubsub.getTopics()).thenReturn([]); // Default behavior
       // Mock methods that don't return a value and might be called
       when(mockPubsub.removePeer(any)).thenAnswer((_) async => {});
@@ -219,7 +221,6 @@ void main() {
 
         final capturedTrace = verify(mockTracer.trace(captureAny)).captured.single as trace_pb.TraceEvent;
         expect(capturedTrace.type, equals(trace_pb.TraceEvent_Type.ADD_PEER));
-        expect(capturedTrace.peerID, equals(mockRemotePeerId.toBytes()));
         expect(capturedTrace.addPeer.peerID, equals(mockRemotePeerId.toBytes()));
         expect(capturedTrace.addPeer.proto, equals(testProtocolId));
       });
@@ -240,7 +241,6 @@ void main() {
 
         final capturedTrace = verify(mockTracer.trace(captureAny)).captured.last as trace_pb.TraceEvent; // last because addPeer also traces
         expect(capturedTrace.type, equals(trace_pb.TraceEvent_Type.REMOVE_PEER));
-        expect(capturedTrace.peerID, equals(mockRemotePeerId.toBytes()));
         expect(capturedTrace.removePeer.peerID, equals(mockRemotePeerId.toBytes()));
 
         expect(router.mesh[topic1], isNot(contains(mockRemotePeerId)));
@@ -276,7 +276,6 @@ void main() {
 
         final capturedTrace = verify(mockTracer.trace(captureAny)).captured.last as trace_pb.TraceEvent;
         expect(capturedTrace.type, equals(trace_pb.TraceEvent_Type.JOIN));
-        expect(capturedTrace.peerID, equals(mockLocalPeerId.toBytes()));
         expect(capturedTrace.join.topic, equals(testTopicName));
       });
 
@@ -294,7 +293,6 @@ void main() {
 
         final capturedTrace = verify(mockTracer.trace(captureAny)).captured.last as trace_pb.TraceEvent;
         expect(capturedTrace.type, equals(trace_pb.TraceEvent_Type.LEAVE));
-        expect(capturedTrace.peerID, equals(mockLocalPeerId.toBytes()));
         expect(capturedTrace.leave.topic, equals(testTopicName));
       });
 
@@ -580,17 +578,15 @@ void main() {
           orElse: () => null,
         ) as trace_pb.TraceEvent?;
         expect(receivedRpcTrace, isNotNull, reason: "RECV_RPC trace not found");
-        expect(receivedRpcTrace!.peerID, equals(mockRpcPeerId.toBytes()));
-        expect(receivedRpcTrace.recvRPC.receivedFrom, equals(mockRpcPeerId.toBytes()));
+        expect(receivedRpcTrace!.recvRPC.receivedFrom, equals(mockRpcPeerId.toBytes()));
 
         final graftTrace = capturedTraces.firstWhere(
           (event) => (event as trace_pb.TraceEvent).type == trace_pb.TraceEvent_Type.GRAFT,
           orElse: () => null,
         ) as trace_pb.TraceEvent?;
         expect(graftTrace, isNotNull, reason: "GRAFT trace not found");
-        expect(graftTrace!.peerID, equals(mockRpcPeerId.toBytes()));
-        expect(graftTrace.graft.topic, equals(testTopicName));
-        expect(graftTrace.graft.peerID, equals(mockRpcPeerId.toBytes()));
+        expect(graftTrace!.graft.topic, equals(testTopicName));
+        expect(graftTrace!.graft.peerID, equals(mockRpcPeerId.toBytes()));
       });
 
       test('handleRpc with PRUNE should remove peer from mesh and trace event', () async {
@@ -617,16 +613,14 @@ void main() {
           orElse: () => null,
         ) as trace_pb.TraceEvent?;
         expect(receivedRpcTrace, isNotNull, reason: "RECV_RPC trace not found");
-        expect(receivedRpcTrace!.peerID, equals(mockRpcPeerId.toBytes()));
 
         final pruneTrace = capturedTraces.firstWhere(
           (event) => (event as trace_pb.TraceEvent).type == trace_pb.TraceEvent_Type.PRUNE,
           orElse: () => null,
         ) as trace_pb.TraceEvent?;
         expect(pruneTrace, isNotNull, reason: "PRUNE trace not found");
-        expect(pruneTrace!.peerID, equals(mockRpcPeerId.toBytes()));
-        expect(pruneTrace.prune.topic, equals(testTopicName));
-        expect(pruneTrace.prune.peerID, equals(mockRpcPeerId.toBytes()));
+        expect(pruneTrace!.prune.topic, equals(testTopicName));
+        expect(pruneTrace!.prune.peerID, equals(mockRpcPeerId.toBytes()));
       });
 
       test('handleRpc with a PRUNE asking for a huge backoff caps it instead of throwing', () async {
@@ -701,8 +695,7 @@ void main() {
         // Verify RECV_RPC trace
         final capturedTraces = verify(mockTracer.trace(captureAny)).captured;
         final recvRpcTrace = capturedTraces.firstWhere(
-          (e) => e.type == trace_pb.TraceEvent_Type.RECV_RPC &&
-                 e.peerID == mockRpcPeerId.toBytes(),
+          (e) => e.type == trace_pb.TraceEvent_Type.RECV_RPC,
           orElse: () => null
         );
         expect(recvRpcTrace, isNotNull, reason: "RECV_RPC for IHAVE not found");
@@ -1169,6 +1162,8 @@ void main() {
         when(mockPubsub.host).thenReturn(mockHost);
         when(mockPubsub.comms).thenReturn(mockComms);
         when(mockPubsub.tracer).thenReturn(mockTracer);
+        when(mockPubsub.tracing).thenReturn(true);
+        when(mockPubsub.traceEvent(any)).thenAnswer((inv) => mockTracer.trace(inv.positionalArguments.first as trace_pb.TraceEvent));
         when(mockPubsub.getTopics()).thenReturn([]);
         when(mockPubsub.removePeer(any)).thenAnswer((_) async => {});
       });
@@ -1317,6 +1312,8 @@ void main() {
         when(mockPubsub.host).thenReturn(mockHost); // Needed by router
         when(mockPubsub.comms).thenReturn(mockComms); // Needed by router
         when(mockPubsub.tracer).thenReturn(mockTracer); // Needed by router
+        when(mockPubsub.tracing).thenReturn(true);
+        when(mockPubsub.traceEvent(any)).thenAnswer((inv) => mockTracer.trace(inv.positionalArguments.first as trace_pb.TraceEvent));
         when(mockPubsub.getTopics()).thenReturn([testTopicName]); // For _shouldProcessMessage
         when(mockPubsub.validateMessage(any, markSeen: anyNamed('markSeen'))).thenAnswer((inv) => _validated(inv, ValidationResult.accept)); // Still need validation before duplicate check
         when(mockPubsub.messageIdFn).thenReturn(defaultMessageIdFn);
@@ -1559,6 +1556,8 @@ void main() {
         when(mockPubsub.host).thenReturn(mockHost);
         when(mockPubsub.comms).thenReturn(mockComms);
         when(mockPubsub.tracer).thenReturn(mockTracer);
+        when(mockPubsub.tracing).thenReturn(true);
+        when(mockPubsub.traceEvent(any)).thenAnswer((inv) => mockTracer.trace(inv.positionalArguments.first as trace_pb.TraceEvent));
         when(mockPubsub.getTopics()).thenReturn([testTopicName]); // Assume joined for mesh management
         when(mockPubsub.removePeer(any)).thenAnswer((_) async => {});
       });
@@ -1591,6 +1590,8 @@ void main() {
           when(mockHost.network).thenReturn(mockNetwork);
           when(mockPubsub.comms).thenReturn(mockComms);
           when(mockPubsub.tracer).thenReturn(mockTracer);
+          when(mockPubsub.tracing).thenReturn(true);
+          when(mockPubsub.traceEvent(any)).thenAnswer((inv) => mockTracer.trace(inv.positionalArguments.first as trace_pb.TraceEvent));
           when(mockPubsub.getTopics()).thenReturn([testTopicName]); // Router is subscribed
           when(mockTracer.trace(any)).thenAnswer((_) => {});
           
@@ -1712,6 +1713,8 @@ void main() {
           when(mockHost.network).thenReturn(mockNetwork);
           when(mockPubsub.comms).thenReturn(mockComms);
           when(mockPubsub.tracer).thenReturn(mockTracer);
+          when(mockPubsub.tracing).thenReturn(true);
+          when(mockPubsub.traceEvent(any)).thenAnswer((inv) => mockTracer.trace(inv.positionalArguments.first as trace_pb.TraceEvent));
           when(mockPubsub.getTopics()).thenReturn([testTopicName]);
           when(mockTracer.trace(any)).thenAnswer((_) => {});
           
@@ -2096,6 +2099,8 @@ void main() {
           when(mockHost.network).thenReturn(mockNetwork);
           when(mockPubsub.comms).thenReturn(mockComms);
           when(mockPubsub.tracer).thenReturn(mockTracer);
+          when(mockPubsub.tracing).thenReturn(true);
+          when(mockPubsub.traceEvent(any)).thenAnswer((inv) => mockTracer.trace(inv.positionalArguments.first as trace_pb.TraceEvent));
           when(mockPubsub.getTopics()).thenReturn([]); // Not subscribed to any topic
           when(mockTracer.trace(any)).thenAnswer((_) => {});
 
@@ -2140,6 +2145,8 @@ void main() {
           when(mockHost.network).thenReturn(mockNetwork);
           when(mockPubsub.comms).thenReturn(mockComms);
           when(mockPubsub.tracer).thenReturn(mockTracer);
+          when(mockPubsub.tracing).thenReturn(true);
+          when(mockPubsub.traceEvent(any)).thenAnswer((inv) => mockTracer.trace(inv.positionalArguments.first as trace_pb.TraceEvent));
           when(mockPubsub.getTopics()).thenReturn([]); // Not subscribed
           when(mockTracer.trace(any)).thenAnswer((_) => {});
           

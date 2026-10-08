@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+### Tracing
+- **The tracers write go-libp2p-pubsub's formats**, so Go's trace tools can read their files. `PbEventTracer` prefixes each event with its length as a varint, where it wrote 4 bytes. `JsonEventTracer` writes one JSON object per line with the fields named as in `trace.proto`, bytes in base64, and the type and timestamp as numbers, where it wrote field numbers as keys.
+- **Every event carries the local peer ID and a timestamp** (nanoseconds since the Unix epoch), as in Go. The router used to set `peerID` to the remote peer, and no event had a timestamp. Routers now send events through the new `PubSub.traceEvent`, which stamps them.
+- `RECV_RPC` events carry the summary of the RPC (`meta`), and the RPC summaries list the subscriptions, as in Go.
+- Tracing after `dispose()` no longer throws: the event is dropped. `stop()` and `dispose()` can be called again.
+
 ## 2.0.0 - 2026-10-08
 
 A review against go-libp2p-pubsub v0.15.0 found remote denial-of-service holes, a crash, interop bugs and a peer-scoring model that did not work. This release fixes them and aligns the router with Go.

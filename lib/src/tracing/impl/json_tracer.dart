@@ -9,10 +9,16 @@ final _log = Logger('JsonEventTracer');
 
 /// An [EventTracer] implementation that outputs trace events as JSON strings.
 /// It can write to an [IOSink] (e.g., a file) or to the console if no sink is provided.
+///
+/// The output is newline-delimited JSON in the form go-libp2p-pubsub's
+/// JSONTracer writes: fields named as in trace.proto, bytes in base64, and
+/// the event type and timestamp as numbers. Events traced after [dispose]
+/// are dropped.
 class JsonEventTracer implements EventTracer {
   final bool _prettyPrint;
   final IOSink? _outputSink;
   bool _shouldCloseSink = false; // Flag to indicate if this instance owns the sink closing
+  bool _disposed = false;
 
   /// Creates a new [JsonEventTracer].
   ///
@@ -31,19 +37,22 @@ class JsonEventTracer implements EventTracer {
     }
   }
 
+  /// [event] as go-libp2p-pubsub encodes it to JSON. Proto3 JSON already
+  /// names the fields and encodes the bytes as Go does, but writes enums as
+  /// names and 64-bit integers as strings, where Go writes numbers.
+  static Map<String, dynamic> toGoJson(pb.TraceEvent event) {
+    final json = event.toProto3Json() as Map<String, dynamic>;
+    if (event.hasType()) json['type'] = event.type.value;
+    if (event.hasTimestamp()) json['timestamp'] = event.timestamp.toInt();
+    return json;
+  }
+
   @override
   void trace(pb.TraceEvent event) {
+    if (_disposed) return;
     try {
-      final jsonString = event.writeToJson();
-      String outputString;
-
-      if (_prettyPrint) {
-        final jsonObject = jsonDecode(jsonString);
-        final encoder = JsonEncoder.withIndent('  ');
-        outputString = encoder.convert(jsonObject);
-      } else {
-        outputString = jsonString;
-      }
+      final json = toGoJson(event);
+      final outputString = _prettyPrint ? const JsonEncoder.withIndent('  ').convert(json) : jsonEncode(json);
 
       if (_outputSink != null) {
         _outputSink.writeln(outputString);
@@ -80,6 +89,7 @@ class JsonEventTracer implements EventTracer {
 
   @override
   Future<void> stop() async {
+    if (_disposed) return;
     // Flush the sink if it exists.
     await _outputSink?.flush();
     if (_outputSink != null) {
@@ -91,7 +101,9 @@ class JsonEventTracer implements EventTracer {
 
   @override
   Future<void> dispose() async {
+    if (_disposed) return;
     await stop(); // Ensure everything is flushed.
+    _disposed = true;
     if (_shouldCloseSink && _outputSink != null) {
       await _outputSink.close();
       _log.fine('JsonEventTracer: Disposed. Owned sink closed.');

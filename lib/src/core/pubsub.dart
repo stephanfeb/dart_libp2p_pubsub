@@ -6,6 +6,7 @@ import 'dart:typed_data'; // For Uint8List, ByteData, Endian
 import 'package:dart_libp2p/core/host/host.dart';
 import 'package:dart_libp2p/core/peer/peer_id.dart';
 import 'package:dart_libp2p/core/crypto/keys.dart'; // For PrivateKey
+import 'package:fixnum/fixnum.dart';
 import '../pb/rpc.pb.dart' as pb;
 
 import 'subscription.dart';
@@ -648,6 +649,20 @@ class PubSub {
     }
   }
 
+  /// Whether a tracer is set. Callers can skip building trace events when
+  /// it is not.
+  bool get tracing => tracer is! NoOpEventTracer;
+
+  /// Sends [event] to the [tracer], stamped as go-libp2p-pubsub stamps every
+  /// trace event: with the local peer ID and the time, in nanoseconds since
+  /// the Unix epoch.
+  void traceEvent(trace_pb.TraceEvent event) {
+    if (!tracing) return;
+    tracer.trace(event
+      ..peerID = host.id.toBytes()
+      ..timestamp = Int64(DateTime.now().microsecondsSinceEpoch) * 1000);
+  }
+
   void _traceReject(PubSubMessage message, String reason) {
     final from = message.receivedFrom;
     if (from == null) return; // Local publish: publish() logs the drop.
@@ -656,9 +671,8 @@ class PubSub {
       ..receivedFrom = from.toBytes()
       ..topic = message.topic
       ..reason = reason;
-    tracer.trace(trace_pb.TraceEvent()
+    traceEvent(trace_pb.TraceEvent()
       ..type = trace_pb.TraceEvent_Type.REJECT_MESSAGE
-      ..peerID = from.toBytes()
       ..rejectMessage = rejectTrace);
   }
 
@@ -727,10 +741,9 @@ class PubSub {
       ..messageID = msgIdBytes
       ..topic = topic;
     
-    final traceEvent = trace_pb.TraceEvent()
-      ..type = trace_pb.TraceEvent_Type.PUBLISH_MESSAGE // Ensure this enum constant is correct
-      ..publishMessage = publishMsgTrace;
-    tracer.trace(traceEvent);
+    traceEvent(trace_pb.TraceEvent()
+      ..type = trace_pb.TraceEvent_Type.PUBLISH_MESSAGE
+      ..publishMessage = publishMsgTrace);
     
     // Delegate to the router for actual publishing logic
     await router.publish(pubSubMessage);

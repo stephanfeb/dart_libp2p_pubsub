@@ -1,5 +1,5 @@
 import 'dart:io'; // For IOSink, File, FileMode
-import 'dart:typed_data'; // For Uint8List, ByteData, Endian
+import 'dart:typed_data'; // For Uint8List
 
 import '../../pb/trace.pb.dart' as pb; // For pb.TraceEvent
 import '../tracer.dart'; // For EventTracer interface
@@ -11,11 +11,14 @@ final _log = Logger('PbEventTracer');
 /// binary protobuf format.
 ///
 /// It can write to an [IOSink] (e.g., a file) or print a confirmation to the
-/// console if no sink is provided. When writing to a sink, events are
-/// length-prefixed (4-byte Big Endian).
+/// console if no sink is provided. When writing to a sink, each event is
+/// prefixed with its length as an unsigned varint, as go-libp2p-pubsub's
+/// PBTracer writes them (a protoio delimited stream). Events traced after
+/// [dispose] are dropped.
 class PbEventTracer implements EventTracer {
   final IOSink? _outputSink;
   bool _shouldCloseSink = false; // Flag to indicate if this instance owns the sink closing
+  bool _disposed = false;
 
   /// Creates a new [PbEventTracer].
   ///
@@ -52,16 +55,25 @@ class PbEventTracer implements EventTracer {
     return "UnknownType (type field not set)";
   }
 
+  /// [length] as an unsigned varint.
+  static Uint8List _uvarint(int length) {
+    final out = <int>[];
+    while (length >= 0x80) {
+      out.add((length & 0x7f) | 0x80);
+      length >>= 7;
+    }
+    out.add(length);
+    return Uint8List.fromList(out);
+  }
+
   @override
   void trace(pb.TraceEvent event) {
+    if (_disposed) return;
     try {
       final Uint8List eventBytes = event.writeToBuffer();
 
       if (_outputSink != null) {
-        // Write length prefix (4-byte BigEndian length)
-        final lengthBytes = Uint8List(4);
-        ByteData.view(lengthBytes.buffer).setUint32(0, eventBytes.lengthInBytes, Endian.big);
-        _outputSink.add(lengthBytes);
+        _outputSink.add(_uvarint(eventBytes.lengthInBytes));
         _outputSink.add(eventBytes);
       } else {
         // For console, just print a confirmation and byte length.
@@ -100,6 +112,7 @@ class PbEventTracer implements EventTracer {
 
   @override
   Future<void> stop() async {
+    if (_disposed) return;
     await _outputSink?.flush();
     if (_outputSink != null) {
       _log.fine('PbEventTracer: Stopped. Sink flushed.');
@@ -110,7 +123,9 @@ class PbEventTracer implements EventTracer {
 
   @override
   Future<void> dispose() async {
+    if (_disposed) return;
     await stop(); // Ensure everything is flushed.
+    _disposed = true;
     if (_shouldCloseSink && _outputSink != null) {
       await _outputSink.close();
       _log.fine('PbEventTracer: Disposed. Owned sink closed.');

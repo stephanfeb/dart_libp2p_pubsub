@@ -402,9 +402,8 @@ class GossipSubRouter implements Router {
     _outbound[peerId] = conns.any((c) => !c.stat.stats.limited && c.stat.stats.direction == Direction.outbound);
     _score?.addPeer(peerId);
     if (doPX) _fetchSignedRecord(peerId);
-    _pubsub?.tracer.trace(trace_pb.TraceEvent()
+    _pubsub?.traceEvent(trace_pb.TraceEvent()
       ..type = trace_pb.TraceEvent_Type.ADD_PEER
-      ..peerID = peerId.toBytes()
       ..addPeer = (trace_pb.TraceEvent_AddPeer()
         ..peerID = peerId.toBytes()
         ..proto = protocolId));
@@ -414,9 +413,8 @@ class GossipSubRouter implements Router {
   Future<void> removePeer(PeerId peerId) async {
     _log.fine('GossipSubRouter: Peer removed - ${peerId.toBase58()}');
     _pubsub?.removePeer(peerId);
-    _pubsub?.tracer.trace(trace_pb.TraceEvent()
+    _pubsub?.traceEvent(trace_pb.TraceEvent()
       ..type = trace_pb.TraceEvent_Type.REMOVE_PEER
-      ..peerID = peerId.toBytes()
       ..removePeer = (trace_pb.TraceEvent_RemovePeer()..peerID = peerId.toBytes()));
     for (final peers in mesh.values) {
       peers.remove(peerId);
@@ -443,10 +441,13 @@ class GossipSubRouter implements Router {
   Future<Set<String>> handleRpc(PeerId peerId, pb.RPC rpc) async {
     final Set<String> acceptedMessageIds = {};
     _log.fine('GossipSubRouter: Handling RPC from ${peerId.toBase58()} for ${rpc.toShortString()}');
-    _pubsub?.tracer.trace(trace_pb.TraceEvent()
-      ..type = trace_pb.TraceEvent_Type.RECV_RPC
-      ..peerID = peerId.toBytes()
-      ..recvRPC = (trace_pb.TraceEvent_RecvRPC()..receivedFrom = peerId.toBytes()));
+    if (_pubsub?.tracing ?? false) {
+      _pubsub!.traceEvent(trace_pb.TraceEvent()
+        ..type = trace_pb.TraceEvent_Type.RECV_RPC
+        ..recvRPC = (trace_pb.TraceEvent_RecvRPC()
+          ..receivedFrom = peerId.toBytes()
+          ..meta = _rpcMeta(rpc, const {})));
+    }
 
     // Messages: drop duplicates first, then validate the new ones
     // concurrently. Subscriptions and control messages are handled below,
@@ -847,9 +848,8 @@ class GossipSubRouter implements Router {
   /// Handles a message that was seen before.
   void _handleDuplicate(PeerId peerId, pb.Message msgProto, String msgIdStr) {
     _log.fine('GossipSubRouter: Received duplicate message ${messageIdToHex(msgIdStr)} from $peerId. Ignoring.');
-    _pubsub?.tracer.trace(trace_pb.TraceEvent()
+    _pubsub?.traceEvent(trace_pb.TraceEvent()
       ..type = trace_pb.TraceEvent_Type.DUPLICATE_MESSAGE
-      ..peerID = peerId.toBytes()
       ..duplicateMessage = (trace_pb.TraceEvent_DuplicateMessage()
         ..messageID = messageIdToBytes(msgIdStr)
         ..receivedFrom = peerId.toBytes()
@@ -928,9 +928,8 @@ class GossipSubRouter implements Router {
     _mcache.put(msgIdStr, msgProto);
     _score?.deliverMessage(msgIdStr, peerId, topicId);
     _fulfillPromise(msgIdStr);
-    pubsub.tracer.trace(trace_pb.TraceEvent()
+    pubsub.traceEvent(trace_pb.TraceEvent()
       ..type = trace_pb.TraceEvent_Type.DELIVER_MESSAGE
-      ..peerID = peerId.toBytes()
       ..deliverMessage = (trace_pb.TraceEvent_DeliverMessage()
         ..messageID = messageIdToBytes(msgIdStr)
         ..receivedFrom = peerId.toBytes()
@@ -1008,9 +1007,8 @@ class GossipSubRouter implements Router {
     final topicId = topic.name;
     if (mesh.containsKey(topicId)) return;
     _log.fine('GossipSubRouter: Joining topic $topicId');
-    _pubsub?.tracer.trace(trace_pb.TraceEvent()
+    _pubsub?.traceEvent(trace_pb.TraceEvent()
       ..type = trace_pb.TraceEvent_Type.JOIN
-      ..peerID = _pubsub?.host.id.toBytes() ?? const []
       ..join = (trace_pb.TraceEvent_Join()..topic = topicId));
 
     // As go-libp2p-pubsub: the mesh starts from the fanout of the topic,
@@ -1040,9 +1038,8 @@ class GossipSubRouter implements Router {
     final peers = mesh.remove(topicId);
     if (peers == null) return;
     _log.fine('GossipSubRouter: Leaving topic $topicId');
-    _pubsub?.tracer.trace(trace_pb.TraceEvent()
+    _pubsub?.traceEvent(trace_pb.TraceEvent()
       ..type = trace_pb.TraceEvent_Type.LEAVE
-      ..peerID = _pubsub?.host.id.toBytes() ?? const []
       ..leave = (trace_pb.TraceEvent_Leave()..topic = topicId));
     for (final peerId in peers) {
       _log.fine('GossipSubRouter: leave: Sending PRUNE to ${peerId.toBase58()} for topic $topicId.');
@@ -1175,18 +1172,16 @@ class GossipSubRouter implements Router {
   }
 
   void _traceGraft(PeerId peerId, String topicId) {
-    _pubsub?.tracer.trace(trace_pb.TraceEvent()
+    _pubsub?.traceEvent(trace_pb.TraceEvent()
       ..type = trace_pb.TraceEvent_Type.GRAFT
-      ..peerID = peerId.toBytes()
       ..graft = (trace_pb.TraceEvent_Graft()
         ..peerID = peerId.toBytes()
         ..topic = topicId));
   }
 
   void _tracePrune(PeerId peerId, String topicId) {
-    _pubsub?.tracer.trace(trace_pb.TraceEvent()
+    _pubsub?.traceEvent(trace_pb.TraceEvent()
       ..type = trace_pb.TraceEvent_Type.PRUNE
-      ..peerID = peerId.toBytes()
       ..prune = (trace_pb.TraceEvent_Prune()
         ..peerID = peerId.toBytes()
         ..topic = topicId));
@@ -1217,15 +1212,9 @@ class GossipSubRouter implements Router {
   }
 
   void _trace(PeerId peerId, pb.RPC rpc, Map<pb.Message, String> idOf, {required bool dropped}) {
-    final meta = trace_pb.TraceEvent_RPCMeta();
-    for (final msg in rpc.publish) {
-      final id = idOf[msg] ?? _idOf(msg);
-      meta.messages.add(trace_pb.TraceEvent_MessageMeta()
-        ..messageID = messageIdToBytes(id)
-        ..topic = msg.topic);
-    }
-    if (rpc.hasControl()) meta.control = _controlMeta(rpc.control);
-    final event = trace_pb.TraceEvent()..peerID = peerId.toBytes();
+    if (!(_pubsub?.tracing ?? false)) return;
+    final meta = _rpcMeta(rpc, idOf);
+    final event = trace_pb.TraceEvent();
     if (dropped) {
       event
         ..type = trace_pb.TraceEvent_Type.DROP_RPC
@@ -1239,7 +1228,7 @@ class GossipSubRouter implements Router {
           ..sendTo = peerId.toBytes()
           ..meta = meta);
     }
-    _pubsub?.tracer.trace(event);
+    _pubsub?.traceEvent(event);
   }
 
   /// Adds the pending gossip and control of [peerId] to [rpc], as
@@ -1300,6 +1289,25 @@ class GossipSubRouter implements Router {
     for (final peerId in _gossip.keys.toList()) {
       if (_gossip.containsKey(peerId)) _sendRpc(peerId, pb.RPC());
     }
+  }
+
+  /// The trace summary of [rpc], as go-libp2p-pubsub's traceRPCMeta.
+  /// [idOf] holds the IDs of messages already computed.
+  trace_pb.TraceEvent_RPCMeta _rpcMeta(pb.RPC rpc, Map<pb.Message, String> idOf) {
+    final meta = trace_pb.TraceEvent_RPCMeta();
+    for (final msg in rpc.publish) {
+      final id = idOf[msg] ?? _idOf(msg);
+      meta.messages.add(trace_pb.TraceEvent_MessageMeta()
+        ..messageID = messageIdToBytes(id)
+        ..topic = msg.topic);
+    }
+    for (final sub in rpc.subscriptions) {
+      meta.subscription.add(trace_pb.TraceEvent_SubMeta()
+        ..subscribe = sub.subscribe
+        ..topic = sub.topicid);
+    }
+    if (rpc.hasControl()) meta.control = _controlMeta(rpc.control);
+    return meta;
   }
 
   static trace_pb.TraceEvent_ControlMeta _controlMeta(pb.ControlMessage control) {
