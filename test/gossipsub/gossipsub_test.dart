@@ -2530,7 +2530,8 @@ void main() {
 
         expect(connected.single.id, equals(pxPeer));
         expect(connected.single.addrs.map((a) => a.toString()), [addr.toString()]);
-        expect(peerstore.addrBook.records, contains(pxPeer));
+        expect(await router.certifiedAddrBook.getPeerRecord(pxPeer), isNotNull,
+            reason: "stored in the router's address book, as go-libp2p-pubsub's gs.cab");
       });
 
       test('connects to PX peers without a record at the addresses it knows', () async {
@@ -2587,7 +2588,9 @@ void main() {
 
       test('our PX carries the signed records of the peers we offer', () async {
         final (pxPeer, keys) = await keyedPeer();
-        await peerstore.addrBook.consumePeerRecord(
+        // As go-libp2p-pubsub, the record comes from the router's own
+        // address book, where identify's records are stored.
+        await router.certifiedAddrBook.consumePeerRecord(
             await Envelope.consumeEnvelope(
                     Uint8List.fromList(await signedRecord(pxPeer, keys, [MultiAddr('/ip4/10.0.0.4/tcp/1')])),
                     PeerRecordEnvelopeDomain)

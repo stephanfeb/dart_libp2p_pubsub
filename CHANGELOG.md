@@ -12,6 +12,7 @@ All notable changes to this project will be documented in this file.
   - **A peer that connects again is not held back by its earlier dead streams.** The dead-peer backoff gave up after 4 dead streams in 10 minutes, also across reconnections. A new connection now clears the peer's history, as in go-libp2p-pubsub.
   - **A failed greeting is tried again** (with the dead-peer backoff) when the peer is still connected and identify says it speaks pubsub. A greeting sent on a connection that was closing was lost before.
   - **A peer is greeted when our stream to it is gone,** also when it is still known as a pubsub peer: on a new connection, and when it opens a stream to us.
+- **Our Peer Exchange now carries signed peer records.** As go-libp2p-pubsub does, `GossipSubRouter` keeps its own certified address book (`router.certifiedAddrBook`) and stores in it the signed peer record of each peer that identify receives (from the host's `EvtPeerIdentificationCompleted` event). Our PRUNEs offer these records, and PX peers are dialed at its addresses. Before, the router read records from the host's address book, which identify never fills (it does not in go-libp2p either), so our PRUNEs rarely carried records and the pruned peers could not dial the peers offered. When a peer disconnects, its addresses in the book drop to the recently-connected TTL, as in Go.
 
 ## 3.0.0 - 2026-10-08
 

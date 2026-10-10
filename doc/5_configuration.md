@@ -179,7 +179,7 @@ The thresholds: below `gossipThreshold` a peer gets no gossip and its gossip is 
 
 Peer Exchange is off by default, as in go-libp2p-pubsub (`WithPeerExchange`); `GossipSubRouter(doPX: true)` turns it on, for bootstrappers and other well-connected nodes.
 
--   `prunePeers` (default: `16`): The number of other topic peers with a score of 0 or more to include in a `PRUNE`, with their signed peer records when the address book has them. No PX is sent to a peer pruned for a negative score. It is also the most peers connected to from one received `PRUNE`.
+-   `prunePeers` (default: `16`): The number of other topic peers with a score of 0 or more to include in a `PRUNE`, with their signed peer records. As in go-libp2p-pubsub, the router keeps its own certified address book (`router.certifiedAddrBook`), filled with the records identify receives from each peer and those received through PX. No PX is sent to a peer pruned for a negative score. It is also the most peers connected to from one received `PRUNE`.
 
 Whatever `doPX` is, the router connects to the PX peers of a received `PRUNE` if the sender's score is at least `acceptPXThreshold` (`PeerScoreThresholds`, default `0`), as go-libp2p-pubsub does. A signed peer record must be about the peer and signed by its key; its addresses are stored in the address book for two minutes, then the peer is dialed at the addresses known for it.
 
