@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## Unreleased
+## 3.1.0 - 2026-10-11
 
 ### Fixed
 - **A subscriber could leave a peer's mesh for good after its stream to the peer failed** (dart-libp2p-cce.4). Seen against Teranode's go-libp2p-pubsub nodes, which close connections often. Now:
