@@ -237,6 +237,7 @@ class PubSub {
     _comms = PubSubProtocol(host, _handleRpc, maxMessageSize: maxMessageSize, protocols: router.protocols);
     _comms.onNewInboundPeer = _handleInboundPeer;
     _comms.onPeerDead = _handlePeerDead;
+    _comms.helloFor = (_) => _helloRpc();
     // It's important that the router is attached so it can also set up its
     // own protocol handlers or react to PubSub initialization.
     router.attach(this).then((_) {
@@ -376,51 +377,96 @@ class PubSub {
   /// accepts the pubsub stream, it is added to the router.
   void announceSubscriptionsTo(PeerId peerId) {
     if (blacklist.contains(peerId)) return;
+    if (!_greeting.add(peerId)) return; // A greeting is under way.
+    _comms.sendRpc(peerId, _helloRpc(), router.protocols.first).then((_) {
+      _addPeer(peerId, _comms.protocolOf(peerId) ?? router.protocols.first);
+    }).catchError((e) {
+      // Typically a peer that does not speak pubsub.
+      _log.fine('PubSub: Could not open a pubsub stream to ${peerId.toBase58()}: $e');
+      _greetAgainLater(peerId);
+    }).whenComplete(() => _greeting.remove(peerId));
+  }
+
+  /// The hello packet: all our subscriptions, possibly none.
+  pb.RPC _helloRpc() {
     final rpc = pb.RPC();
     for (final topic in _subscriptions.keys) {
       rpc.subscriptions.add(pb.RPC_SubOpts()
         ..subscribe = true
         ..topicid = topic);
     }
-    _greeting.add(peerId);
-    _comms.sendRpc(peerId, rpc, router.protocols.first).then((_) {
-      _addPeer(peerId, _comms.protocolOf(peerId) ?? router.protocols.first);
-    }).catchError((e) {
-      // Typically a peer that does not speak pubsub.
-      _log.fine('PubSub: Could not open a pubsub stream to ${peerId.toBase58()}: $e');
-    }).whenComplete(() => _greeting.remove(peerId));
+    return rpc;
+  }
+
+  /// Whether [peerId] needs our hello: it is not a pubsub peer yet, or our
+  /// stream to it is gone, so the peer may not know our subscriptions.
+  bool _needsHello(PeerId peerId) =>
+      !_greeting.contains(peerId) &&
+      (!_peers.contains(peerId) || !_comms.hasOutboundStream(peerId));
+
+  /// A greeting failed. If the peer is still connected and identify says it
+  /// speaks pubsub, the failure was the stream (for example, opened on a
+  /// connection that was closing), not the peer: greet it again after the
+  /// dead-peer backoff. A peer that does not speak pubsub is not retried.
+  void _greetAgainLater(PeerId peerId) {
+    if (_stopped || !host.network.peers.contains(peerId)) return;
+    Future.sync(() => host.peerStore.protoBook.supportsProtocols(peerId, router.protocols))
+        .then((supported) {
+      if (supported.isEmpty) return;
+      final delay = _deadPeerBackoff.next(peerId);
+      if (delay == null) {
+        _log.fine('PubSub: Giving up greeting ${peerId.toBase58()} after too many attempts.');
+        return;
+      }
+      Timer(delay, () {
+        if (!_stopped && _needsHello(peerId) && host.network.peers.contains(peerId)) {
+          announceSubscriptionsTo(peerId);
+        }
+      });
+    }).catchError((Object e) {
+      _log.fine('PubSub: Could not read the protocols of ${peerId.toBase58()}: $e');
+    });
   }
 
   /// A peer opened a pubsub stream to us: it speaks pubsub.
   void _handleInboundPeer(PeerId peerId, String protocol) {
-    final isNew = !_peers.contains(peerId);
+    final needsHello = _needsHello(peerId);
     _addPeer(peerId, protocol);
-    // Make sure it has our subscriptions, if we have not greeted it yet.
-    if (isNew) announceSubscriptionsTo(peerId);
+    // Make sure it has our subscriptions: a new peer, or one whose stream
+    // from us is gone (a peer that opens a new stream may have restarted).
+    if (needsHello) announceSubscriptionsTo(peerId);
   }
 
   /// The backoff of greeting again peers that ended our stream to them.
   final _deadPeerBackoff = _DeadPeerBackoff();
 
-  /// A peer ended our stream to it, as go-libp2p-pubsub's handleDeadPeers:
-  /// it is removed from the router and, if still connected (it restarted
-  /// its pubsub, or a duplicate connection closed), greeted again after a
-  /// backoff, which opens a new stream and adds it back.
+  /// Our stream to a peer ended or failed, as go-libp2p-pubsub's
+  /// handleDeadPeers.
+  ///
+  /// If the peer is still connected (a duplicate connection closed, the
+  /// stream failed, or the peer restarted its pubsub), it stays in the
+  /// router: what it told us (its topics) and our mesh with it are still
+  /// true, and the peer does not send them again. It is greeted on a new
+  /// stream after a backoff; the first RPC on that stream carries our
+  /// subscriptions and, from GossipSub, a GRAFT for each mesh it is in.
+  /// Removing it from the router lost its topics: we never sent it GRAFT
+  /// again, and the mesh stayed one-sided.
+  ///
+  /// A peer that is gone, or whose streams died too often, is removed.
   void _handlePeerDead(PeerId peerId) {
     if (!_peers.contains(peerId)) return;
-    _log.fine('PubSub: Peer ${peerId.toBase58()} ended our stream to it.');
-    router.removePeer(peerId).catchError((e) {
-      _log.warning('PubSub: Error removing peer ${peerId.toBase58()}: $e');
-    });
-    _peers.remove(peerId);
-    if (!host.network.peers.contains(peerId)) return;
-    final delay = _deadPeerBackoff.next(peerId);
+    _log.fine('PubSub: Our stream to ${peerId.toBase58()} ended.');
+    final delay = host.network.peers.contains(peerId) ? _deadPeerBackoff.next(peerId) : null;
     if (delay == null) {
-      _log.fine('PubSub: Giving up on ${peerId.toBase58()} after too many dead streams.');
+      _log.fine('PubSub: Removing ${peerId.toBase58()} (disconnected, or too many dead streams).');
+      router.removePeer(peerId).catchError((e) {
+        _log.warning('PubSub: Error removing peer ${peerId.toBase58()}: $e');
+      });
+      _peers.remove(peerId);
       return;
     }
     Timer(delay, () {
-      if (!_stopped && !_peers.contains(peerId) && host.network.peers.contains(peerId)) {
+      if (!_stopped && _needsHello(peerId) && host.network.peers.contains(peerId)) {
         announceSubscriptionsTo(peerId);
       }
     });
@@ -887,12 +933,16 @@ class PubSub {
         // As in go-libp2p-pubsub, each side sends its subscriptions to a new
         // peer, so that both know which topics they share.
         ..onPeerConnected((peerId) {
-          if (!_peers.contains(peerId)) announceSubscriptionsTo(peerId);
+          // A new connection starts a new history: as go-libp2p-pubsub, a
+          // peer that comes back is not held back by its earlier dead
+          // streams.
+          _deadPeerBackoff.forget(peerId);
+          if (_needsHello(peerId)) announceSubscriptionsTo(peerId);
         })
         ..onPeerDisconnected(router.removePeer);
       // Greet the peers connected before start, as go-libp2p-pubsub does.
       for (final peerId in host.network.peers) {
-        if (!_peers.contains(peerId)) announceSubscriptionsTo(peerId);
+        if (_needsHello(peerId)) announceSubscriptionsTo(peerId);
       }
     }
     _log.fine('PubSub: Started successfully.');
@@ -995,5 +1045,8 @@ class _DeadPeerBackoff {
     _history[peerId] = (delay: delay, lastTried: now, attempts: (h?.attempts ?? 0) + 1);
     return delay;
   }
+
+  /// Clears the history of [peerId].
+  void forget(PeerId peerId) => _history.remove(peerId);
 }
 

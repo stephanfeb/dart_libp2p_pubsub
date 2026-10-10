@@ -403,11 +403,33 @@ class GossipSubRouter implements Router {
     _rpcQueueManagerOrNull = RpcOutgoingQueueManager(pubsub.comms, gossipSubIDv11,
         maxQueueSize: pubsub.peerOutboundQueueSize);
     // As go-libp2p-pubsub, a v1.3 peer gets our extensions in our first RPC.
-    pubsub.comms.onFirstRpc = (peer, protocol, rpc) =>
-        protocol == gossipSubIDv13 ? extensions.firstRpc(peer, rpc) : rpc;
+    pubsub.comms.onFirstRpc = (peer, protocol, rpc) {
+      final withGrafts = _withMeshGrafts(peer, rpc);
+      return protocol == gossipSubIDv13 ? extensions.firstRpc(peer, withGrafts) : withGrafts;
+    };
     final gaterParams = peerGaterParams;
     if (gaterParams != null) _gate = PeerGater(gaterParams, pubsub.host);
     _log.fine('GossipSubRouter attached to PubSub and RpcQueueManager initialized.');
+  }
+
+  /// [rpc] with a GRAFT for each topic whose mesh has [peer], for the first
+  /// RPC on a new stream to it. A new stream to a peer already in our mesh
+  /// means our old stream died: the peer may have lost its state for us
+  /// (it restarted, or saw our connection close). It ignores a GRAFT for a
+  /// mesh it already has us in; otherwise the GRAFT puts us back, so the
+  /// mesh is not one-sided.
+  pb.RPC _withMeshGrafts(PeerId peer, pb.RPC rpc) {
+    final topics = [
+      for (final entry in mesh.entries)
+        if (entry.value.contains(peer)) entry.key,
+    ];
+    if (topics.isEmpty) return rpc;
+    final grafted = {for (final g in rpc.control.graft) g.topicID};
+    final out = rpc.clone();
+    for (final topic in topics) {
+      if (!grafted.contains(topic)) out.ensureControl().graft.add(pb.ControlGraft()..topicID = topic);
+    }
+    return out;
   }
 
   List<String> _connectionIps(PeerId peer) {

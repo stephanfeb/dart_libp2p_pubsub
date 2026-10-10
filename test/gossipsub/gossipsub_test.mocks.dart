@@ -938,6 +938,15 @@ class MockPubSubProtocol extends _i1.Mock implements _i13.PubSubProtocol {
       );
 
   @override
+  set helloFor(_i26.RPC Function(_i2.PeerId)? _helloFor) => super.noSuchMethod(
+        Invocation.setter(
+          #helloFor,
+          _helloFor,
+        ),
+        returnValueForMissingStub: null,
+      );
+
+  @override
   List<String> get protocols => (super.noSuchMethod(
         Invocation.getter(#protocols),
         returnValue: <String>[],
@@ -973,6 +982,22 @@ class MockPubSubProtocol extends _i1.Mock implements _i13.PubSubProtocol {
         #protocolOf,
         [peerId],
       )) as String?);
+
+  @override
+  bool hasOutboundStream(_i2.PeerId? peerId) => (super.noSuchMethod(
+        Invocation.method(
+          #hasOutboundStream,
+          [peerId],
+        ),
+        returnValue: false,
+      ) as bool);
+
+  @override
+  _i8.P2PStream<dynamic>? outboundStreamForTesting(_i2.PeerId? peerId) =>
+      (super.noSuchMethod(Invocation.method(
+        #outboundStreamForTesting,
+        [peerId],
+      )) as _i8.P2PStream<dynamic>?);
 
   @override
   _i20.Future<void> sendRpc(

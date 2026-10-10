@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:dart_libp2p/core/network/stream.dart';
 import 'dart:collection';
 import 'dart:typed_data'; // For Uint8List
 
@@ -111,6 +112,15 @@ class MockPubSubProtocol implements PubSubProtocol {
 
   @override
   pb.RPC Function(PeerId peerId, String protocol, pb.RPC rpc)? onFirstRpc;
+
+  @override
+  pb.RPC Function(PeerId peerId)? helloFor;
+
+  @override
+  bool hasOutboundStream(PeerId peerId) => true;
+
+  @override
+  P2PStream? outboundStreamForTesting(PeerId peerId) => null;
 
   @override
   int maxMessageSize = 1 << 20;

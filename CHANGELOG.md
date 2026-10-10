@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+### Fixed
+- **A subscriber could leave a peer's mesh for good after its stream to the peer failed** (dart-libp2p-cce.4). Seen against Teranode's go-libp2p-pubsub nodes, which close connections often. Now:
+  - **A stream that fails is reported once, on every path.** `sendRpc` replaced a stream that could not take writes, or that had closed before its watcher saw it, without telling `PubSub`. The peer, seeing a new stream, could have forgotten our subscriptions, and our router still had it in the mesh, so neither side sent GRAFT. All these paths now go through one place, which resets the stream and reports the peer dead.
+  - **Each new outbound stream starts with our subscriptions,** as go-libp2p-pubsub writes its hello packet first on each stream. They go first in the first RPC (`PubSubProtocol.helloFor`).
+  - **A peer whose stream failed, but which is still connected, stays in the router.** Its topics and our mesh with it are kept, because the peer does not send them again. Before, it was removed: its topics were lost, and we never sent GRAFT to it again. GossipSub adds a GRAFT for each mesh the peer is in to the first RPC on the new stream. A peer that already has us in that mesh ignores the GRAFT.
+  - **A peer that connects again is not held back by its earlier dead streams.** The dead-peer backoff gave up after 4 dead streams in 10 minutes, also across reconnections. A new connection now clears the peer's history, as in go-libp2p-pubsub.
+  - **A failed greeting is tried again** (with the dead-peer backoff) when the peer is still connected and identify says it speaks pubsub. A greeting sent on a connection that was closing was lost before.
+  - **A peer is greeted when our stream to it is gone,** also when it is still known as a pubsub peer: on a new connection, and when it opens a stream to us.
+
 ## 3.0.0 - 2026-10-08
 
 This release closes the remaining gaps with go-libp2p-pubsub v0.15.0 found by the 2.0.0 review: GossipSub v1.3, topic discovery, Go's trace formats, the peer gater and the seen-message cache. It also adds two options applications asked for: setting a topic's score parameters at runtime, and the outbound queue size.

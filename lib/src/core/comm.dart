@@ -111,6 +111,13 @@ class PubSubProtocol {
   /// go-libp2p-pubsub does to the hello packet.
   pb.RPC Function(PeerId peerId, String protocol, pb.RPC rpc)? onFirstRpc;
 
+  /// Returns the hello packet for [peerId]: our subscriptions. Its
+  /// subscriptions are put first in the first RPC on each new outbound
+  /// stream, as go-libp2p-pubsub writes the hello packet first on each
+  /// stream. A peer that sees a new stream from us may have forgotten our
+  /// subscriptions; without them it forwards us nothing.
+  pb.RPC Function(PeerId peerId)? helloFor;
+
   /// Map of persistent outbound streams per peer
   final Map<PeerId, _PersistentStream> _outboundStreams = {};
 
@@ -275,10 +282,10 @@ class PubSubProtocol {
       return existingStream;
     }
 
-    // Remove closed stream if present
+    // The stream ended before its watcher saw it: the peer is dead.
     if (existingStream != null) {
-      _outboundStreams.remove(peerId);
-      _log.fine('Removed closed stream for peer $peerId');
+      _log.fine('Stream to $peerId is closed');
+      _streamDied(existingStream);
     }
 
     // Check if another call is already creating a stream for this peer
@@ -347,16 +354,49 @@ class PubSubProtocol {
       if (data.isNotEmpty) _log.fine('Unexpected data from $peerId on our stream to it');
     }, onError: (Object e) {
       _log.fine('Our stream to $peerId failed: $e');
-    }).whenComplete(() {
-      if (!identical(_outboundStreams[peerId], persistent)) return; // Closed by us.
-      _outboundStreams.remove(peerId);
-      _negotiated.remove(peerId);
-      persistent._isClosed = true;
-      persistent.stream.reset().catchError((Object e) {
-        _log.fine('Error resetting the stream to $peerId: $e');
-      });
-      if (!_isClosing) onPeerDead?.call(peerId);
+    }).whenComplete(() => _streamDied(persistent));
+  }
+
+  /// Our stream to a peer ended or failed: removes and resets it and calls
+  /// [onPeerDead], as go-libp2p-pubsub's `handlePeerDead`, so the peer is
+  /// removed from the router and greeted again on a new stream. Does
+  /// nothing if [persistent] is no longer the peer's stream (we closed or
+  /// replaced it).
+  ///
+  /// Every path that drops a stream must come here. Replacing a stream
+  /// without it left the router believing the peer in its mesh, while the
+  /// peer, seeing a new stream, had forgotten us: neither side sent GRAFT.
+  void _streamDied(_PersistentStream persistent) {
+    final peerId = persistent.peerId;
+    if (!identical(_outboundStreams[peerId], persistent)) return;
+    _outboundStreams.remove(peerId);
+    _negotiated.remove(peerId);
+    persistent._isClosed = true;
+    persistent.stream.reset().catchError((Object e) {
+      _log.fine('Error resetting the stream to $peerId: $e');
     });
+    if (!_isClosing) onPeerDead?.call(peerId);
+  }
+
+  /// Whether we have an open outbound stream to [peerId].
+  bool hasOutboundStream(PeerId peerId) =>
+      !(_outboundStreams[peerId]?.isClosed ?? true);
+
+  /// Our outbound stream to [peerId], for tests.
+  P2PStream? outboundStreamForTesting(PeerId peerId) => _outboundStreams[peerId]?.stream;
+
+  /// [rpc] with the hello packet's subscriptions put first, without
+  /// repeating a topic that [rpc] already subscribes to or leaves.
+  pb.RPC _withHello(PeerId peerId, pb.RPC rpc) {
+    final hello = helloFor?.call(peerId);
+    if (hello == null || hello.subscriptions.isEmpty) return rpc;
+    final own = {for (final sub in rpc.subscriptions) sub.topicid};
+    final merged = rpc.clone();
+    merged.subscriptions
+      ..clear()
+      ..addAll(hello.subscriptions.where((sub) => !own.contains(sub.topicid)))
+      ..addAll(rpc.subscriptions);
+    return merged;
   }
 
   /// Sends an RPC message to a specific peer using a persistent stream.
@@ -374,14 +414,17 @@ class PubSubProtocol {
 
     // Try up to 2 times (initial + 1 retry) for stream state issues
     for (var attempt = 0; attempt < 2; attempt++) {
+      // The stream this attempt writes on, once it has one.
+      _PersistentStream? used;
       try {
         // Get or create persistent stream
         final persistentStream = await _getOrCreateStream(peerId, protocolId);
+        used = persistentStream;
 
         // Check stream is writable (race condition protection)
         if (!persistentStream.stream.isWritable) {
-          _log.fine('Stream to $peerId not writable, removing from cache');
-          _outboundStreams.remove(peerId);
+          _log.fine('Stream to $peerId not writable');
+          _streamDied(persistentStream);
           if (attempt == 0) {
             continue; // Retry with fresh stream
           }
@@ -393,7 +436,8 @@ class PubSubProtocol {
           // Set before any await, so that only this RPC goes first; writes
           // are made in the order they are started.
           persistentStream.firstRpcSent = true;
-          toSend = onFirstRpc?.call(peerId, persistentStream.stream.protocol(), rpc) ?? rpc;
+          toSend = _withHello(peerId, rpc);
+          toSend = onFirstRpc?.call(peerId, persistentStream.stream.protocol(), toSend) ?? toSend;
         }
 
         // Encode with varint length prefix (matches go-libp2p-pubsub msgio framing)
@@ -413,47 +457,27 @@ class PubSubProtocol {
         return; // Success
         
       } on YamuxStreamStateException catch (e) {
-        // Stream state error - retry once with fresh stream
+        // The stream failed: the peer is dead to us (see _streamDied). One
+        // more attempt opens a new stream, which starts with the hello.
+        if (used != null) _streamDied(used);
         if (attempt == 0) {
-          _log.fine('Stream to $peerId in state ${e.currentState}, removing and retrying...');
-          final stream = _outboundStreams.remove(peerId);
-          if (stream != null) {
-            await stream.close(streamCloseTimeout);
-          }
-          continue; // Retry
+          _log.fine('Stream to $peerId in state ${e.currentState}, retrying on a new stream');
+          continue;
         }
-        
-        // Second attempt failed, clean up and rethrow
         _log.fine('Failed to send RPC to $peerId after retry: ${e.message}');
-        _outboundStreams.remove(peerId);
         rethrow;
-        
       } on RpcTooLargeException {
         rethrow; // The stream is fine; only this RPC is refused.
-      } on IdentifyTimeoutException catch (e) {
-        // Identify timeout - peer may have gone offline. Handle gracefully.
-        _log.fine('PubSubProtocol: Identify timeout sending RPC to $peerId. Peer unreachable: $e');
-        final stream = _outboundStreams.remove(peerId);
-        if (stream != null) {
-          await stream.close(streamCloseTimeout);
-        }
-        // Don't rethrow - this is a recoverable error that the RPC queue will handle
-        rethrow;
-      } on IdentifyException catch (e, s) {
-        // Other identify error - handle gracefully
-        _log.fine('PubSubProtocol: Identify error sending RPC to $peerId: $e\n$s');
-        final stream = _outboundStreams.remove(peerId);
-        if (stream != null) {
-          await stream.close(streamCloseTimeout);
-        }
+      } on IdentifyException catch (e) {
+        // Opening the stream failed (IdentifyTimeoutException included):
+        // the peer may have gone offline. The RPC queue handles the error.
+        _log.fine('PubSubProtocol: Identify error sending RPC to $peerId: $e');
+        if (used != null) _streamDied(used);
         rethrow;
       } catch (e, s) {
         // Any other exception type - don't retry, just fail
         _log.fine('Error sending RPC to $peerId on $protocolId: $e\n$s');
-        final stream = _outboundStreams.remove(peerId);
-        if (stream != null) {
-          await stream.close(streamCloseTimeout);
-        }
+        if (used != null) _streamDied(used);
         rethrow;
       }
     }

@@ -269,8 +269,8 @@ void main() {
         expect(e, isA<Exception>());
       }
 
-      // Verify failed stream was closed
-      verify(mockStream1.close()).called(1);
+      // The failed stream is reset, as go-libp2p-pubsub's handlePeerDead.
+      verify(mockStream1.reset()).called(1);
 
       // Setup new stream
       when(mockHost.newStream(mockPeer1, [gossipSubIDv11], any))
@@ -281,6 +281,112 @@ void main() {
       
       verify(mockHost.newStream(mockPeer1, [gossipSubIDv11], any)).called(2);
       verify(mockStream2.write(any)).called(1);
+    });
+
+    MockP2PStream liveStream(String id, List<Uint8List> writes) {
+      final stream = MockP2PStream();
+      when(stream.read(any)).thenAnswer((_) => Completer<Uint8List>().future);
+      when(stream.protocol()).thenReturn(gossipSubIDv11);
+      when(stream.id()).thenReturn(id);
+      when(stream.isClosed).thenReturn(false);
+      when(stream.isWritable).thenReturn(true);
+      when(stream.write(any)).thenAnswer((inv) async {
+        writes.add(inv.positionalArguments.first as Uint8List);
+      });
+      return stream;
+    }
+
+    // Decodes one varint-length-prefixed RPC frame.
+    pb.RPC decodeFrame(Uint8List frame) {
+      var length = 0, shift = 0, i = 0;
+      while (true) {
+        final b = frame[i++];
+        length |= (b & 0x7f) << shift;
+        if (b & 0x80 == 0) break;
+        shift += 7;
+      }
+      return pb.RPC.fromBuffer(frame.sublist(i, i + length));
+    }
+
+    pb.RPC hello(List<String> topics) => pb.RPC()
+      ..subscriptions.addAll([
+        for (final t in topics) pb.RPC_SubOpts()..subscribe = true..topicid = t,
+      ]);
+
+    test('the first RPC on a new stream starts with the hello', () async {
+      final writes = <Uint8List>[];
+      final stream = liveStream('stream-1', writes);
+      when(mockHost.newStream(mockPeer1, [gossipSubIDv11], any)).thenAnswer((_) async => stream);
+      protocol.helloFor = (_) => hello(['a', 'b']);
+
+      final publish = pb.RPC()..publish.add(pb.Message()..topic = 'a');
+      await protocol.sendRpc(mockPeer1, publish, gossipSubIDv11);
+      await protocol.sendRpc(mockPeer1, publish, gossipSubIDv11);
+
+      final first = decodeFrame(writes[0]);
+      expect(first.subscriptions.map((s) => s.topicid), ['a', 'b']);
+      expect(first.publish, hasLength(1));
+      // Only the first RPC on the stream carries it.
+      expect(decodeFrame(writes[1]).subscriptions, isEmpty);
+    });
+
+    test('the hello does not repeat a topic the RPC subscribes to or leaves', () async {
+      final writes = <Uint8List>[];
+      final stream = liveStream('stream-1', writes);
+      when(mockHost.newStream(mockPeer1, [gossipSubIDv11], any)).thenAnswer((_) async => stream);
+      protocol.helloFor = (_) => hello(['a', 'b']);
+
+      final leave = pb.RPC()..subscriptions.add(pb.RPC_SubOpts()..subscribe = false..topicid = 'b');
+      await protocol.sendRpc(mockPeer1, leave, gossipSubIDv11);
+
+      final first = decodeFrame(writes[0]);
+      expect([for (final s in first.subscriptions) (s.topicid, s.subscribe)],
+          [('a', true), ('b', false)]);
+    });
+
+    test('a stream that stops being writable reports the peer dead, '
+        'and its replacement starts with the hello', () async {
+      final writes1 = <Uint8List>[];
+      final writes2 = <Uint8List>[];
+      final stream1 = liveStream('stream-1', writes1);
+      final stream2 = liveStream('stream-2', writes2);
+      var opened = 0;
+      when(mockHost.newStream(mockPeer1, [gossipSubIDv11], any))
+          .thenAnswer((_) async => opened++ == 0 ? stream1 : stream2);
+      final dead = <PeerId>[];
+      protocol.onPeerDead = dead.add;
+      protocol.helloFor = (_) => hello(['a']);
+
+      await protocol.sendRpc(mockPeer1, pb.RPC(), gossipSubIDv11);
+      expect(protocol.hasOutboundStream(mockPeer1), isTrue);
+
+      // The stream is half closed: still open for reads, so its watcher
+      // does not see it end.
+      when(stream1.isWritable).thenReturn(false);
+      final publish = pb.RPC()..publish.add(pb.Message()..topic = 'a');
+      await protocol.sendRpc(mockPeer1, publish, gossipSubIDv11);
+
+      expect(dead, [mockPeer1], reason: 'the router must drop the peer and greet it again');
+      verify(stream1.reset()).called(1);
+      final first = decodeFrame(writes2.single);
+      expect(first.subscriptions.map((s) => s.topicid), ['a']);
+      expect(first.publish, hasLength(1));
+    });
+
+    test('a stream found closed before its watcher saw it reports the peer dead', () async {
+      final stream1 = liveStream('stream-1', []);
+      final stream2 = liveStream('stream-2', []);
+      var opened = 0;
+      when(mockHost.newStream(mockPeer1, [gossipSubIDv11], any))
+          .thenAnswer((_) async => opened++ == 0 ? stream1 : stream2);
+      final dead = <PeerId>[];
+      protocol.onPeerDead = dead.add;
+
+      await protocol.sendRpc(mockPeer1, pb.RPC(), gossipSubIDv11);
+      when(stream1.isClosed).thenReturn(true);
+      await protocol.sendRpc(mockPeer1, pb.RPC(), gossipSubIDv11);
+
+      expect(dead, [mockPeer1]);
     });
 
     test('closes all streams on protocol close', () async {
